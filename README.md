@@ -4,7 +4,7 @@
 [![ComfyUI](https://img.shields.io/badge/ComfyUI-Custom%20Nodes-blue)](https://github.com/comfyanonymous/ComfyUI)
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue)](https://www.python.org/)
 
-一套专为 ComfyUI 设计的实用工具节点集合，专注于模型分辨率管理、视频帧提取和资源库可视化浏览。
+一套专为 ComfyUI 设计的实用工具节点集合，专注于模型分辨率管理、视频帧提取、资源库可视化浏览和动态提示词处理。
 
 ---
 
@@ -25,6 +25,7 @@
 - 📐 **分辨率管理** - 内置多模型官方分辨率规范，一键切换
 - 🔄 **视频帧提取** - WebP 格式长视频分段生成桥接工具
 - 🖼️ **视觉资源库** - 可视化图片浏览器，支持文件夹管理和图片选择
+- 📝 **动态提示词** - 智能组合多个提示词输入，自动适配连接端口
 - ⚡ **智能适配** - 自动适配不同模型的分辨率倍数要求
 
 ---
@@ -59,7 +60,7 @@
    ```bash
    # 使用 git 克隆（推荐）
    cd ComfyUI/custom_nodes
-   git clone https://github.com/yourusername/geniusewzq_tools.git
+   git clone https://github.com/geniusewzq/geniusewzq_tools.git
    
    # 或者手动下载 ZIP 文件并解压到 custom_nodes 目录
    ```
@@ -89,10 +90,12 @@
            ├── aspect_ratio_switcher.py
            ├── webp_bridge.py
            ├── character_selector.py
+           ├── dynamic_node.py
            ├── requirements.txt
            ├── web/
            │   └── js/
-           │       └── visual_browser.js
+           │       ├── visual_browser.js
+           │       └── dynamic_input.js
            └── README.md
    ```
 
@@ -180,7 +183,7 @@ python -c "from PIL import Image; print(Image.registered_extensions())"
 #### 支持的模型
 
 | 模型 | 分辨率倍数 | 预设选项 |
-|------|-----------|---------|
+|------|-----------|--------|
 | **Flux2-klein** | 16x | 1:1 原生 (1024×1024)、4:3 经典 (1152×864)、16:9 电影 (1360×768) 等 |
 | **Qwen-Image-Edit-2512** | 16x | 1:1 官方最优 (1328×1328)、1:1 平衡位 (1024×1024)、16:9 横屏 (1664×928) 等 |
 | **Z-ImageTurbo** | 64x | 1:1 标准 (1024×1024)、16:9 横屏 (1344×768)、9:16 竖屏 (768×1344) 等 |
@@ -297,6 +300,41 @@ python -c "from PIL import Image; print(Image.registered_extensions())"
 
 ---
 
+### 4. 动态提示词链 (DynamicPromptChain)
+
+智能组合多个提示词输入，自动适配连接端口，实现提示词的灵活拼接。
+
+#### 输入参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `input_1` | STRING | - | 第一个提示词输入（必需） |
+| `input_2` | STRING | - | 第二个提示词输入（自动添加） |
+| `input_3` | STRING | - | 第三个提示词输入（自动添加） |
+| ... | STRING | - | 更多提示词输入（自动添加） |
+
+#### 输出参数
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `text` | STRING | 合并后的提示词文本，以逗号分隔 |
+
+#### 动态端口特性
+
+- **自动增加**：当最后一个输入端口被连接时，自动添加新的输入端口
+- **自动减少**：当最后两个输入端口都未连接时，自动删除多余的端口
+- **智能排序**：按照端口序号（input_1, input_2, ...）排序后合并
+- **空值过滤**：自动过滤空的提示词输入
+
+#### 使用场景
+
+- 组合多个提示词片段
+- 构建复杂的提示词结构
+- 模块化提示词管理
+- 动态调整提示词组合
+
+---
+
 ## 📖 使用教程
 
 ### 教程 1: 模型分辨率快速切换
@@ -354,6 +392,28 @@ python -c "from PIL import Image; print(Image.registered_extensions())"
 
 ---
 
+### 教程 4: 动态组合提示词
+
+```
+[文本输入1] → [动态提示词链] → [KSampler]
+[文本输入2] → ↑
+[文本输入3] → ↑
+```
+
+**配置**:
+1. 连接第一个文本输入到 `input_1`
+2. 连接第二个文本输入时，节点会自动添加 `input_2` 端口
+3. 连接第三个文本输入时，节点会自动添加 `input_3` 端口
+4. 所有非空提示词会按顺序合并，以逗号分隔
+
+**示例**:
+- input_1: "a beautiful girl"
+- input_2: "with long hair"
+- input_3: "wearing a red dress"
+- 输出: "a beautiful girl, with long hair, wearing a red dress"
+
+---
+
 ## ❓ 常见问题
 
 ### Q1: 比例切换器生成的图像变形？
@@ -378,7 +438,14 @@ python -c "from PIL import Image; print(Image.registered_extensions())"
 - 点击节点顶部的 "🔄 刷新" 按钮
 - 检查浏览器控制台是否有报错信息
 
-### Q4: 节点显示为红色/无法加载？
+### Q4: 动态提示词链不自动添加端口？
+
+**A**: 
+- 确保你连接的是最后一个可用端口
+- 检查浏览器控制台是否有报错信息
+- 尝试刷新 ComfyUI 页面
+
+### Q5: 节点显示为红色/无法加载？
 
 **A**: 
 1. 检查 `requirements.txt` 中的依赖是否已安装：
@@ -394,7 +461,7 @@ python -c "from PIL import Image; print(Image.registered_extensions())"
    pip install -r requirements.txt --force-reinstall
    ```
 
-### Q5: 安装依赖时提示权限不足？
+### Q6: 安装依赖时提示权限不足？
 
 **A**: 
 - **Windows**: 以管理员身份运行命令提示符
@@ -403,7 +470,7 @@ python -c "from PIL import Image; print(Image.registered_extensions())"
   sudo pip install -r requirements.txt
   ```
 
-### Q6: 如何验证 Pillow 是否支持 WebP？
+### Q7: 如何验证 Pillow 是否支持 WebP？
 
 **A**: 
 ```python
@@ -414,6 +481,12 @@ print('WEBP support:', 'WEBP' in Image.registered_extensions().values())
 ---
 
 ## 📝 更新日志
+
+### v1.2.0 (2026-04-07)
+- ✨ 新增 `动态提示词链` 节点
+- 🔄 支持自动适配输入端口数量
+- 📝 智能合并多个提示词输入
+- 🎯 自动过滤空值并按顺序排序
 
 ### v1.1.0 (2026-03-14)
 - ✨ 新增 `视觉资源库选择器` 节点
