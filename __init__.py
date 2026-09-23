@@ -6,6 +6,8 @@ from server import PromptServer
 from .aspect_ratio_switcher import AspectRatioSwitcher
 from .webp_bridge import WebpLongVideoBridgeFinal 
 from .character_selector import VisualCharacterSelector
+from .dynamic_node import DynamicPromptChain
+from .fast_groups import FastGroupsBypasser
 
 # --- 自动处理 send2trash 依赖 ---
 def install_send2trash():
@@ -48,12 +50,16 @@ NODE_CLASS_MAPPINGS = {
     "AspectRatioSwitcher": AspectRatioSwitcher,
     "WebpLongVideoBridgeFinal": WebpLongVideoBridgeFinal,
     "VisualCharacterSelector": VisualCharacterSelector,
+    "DynamicPromptChain": DynamicPromptChain,
+    "FastGroupsBypasser": FastGroupsBypasser,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "AspectRatioSwitcher": "比例切换器",
     "WebpLongVideoBridgeFinal": "截取关键帧",
-    "VisualCharacterSelector": "视觉资源库选择器", 
+    "VisualCharacterSelector": "视觉资源库选择器",
+    "DynamicPromptChain": "动态提示词链",
+    "FastGroupsBypasser": "快速分组开关",
 }
 
 # ！！！极其重要：必须指定这个目录，前端 JS 才会生效
