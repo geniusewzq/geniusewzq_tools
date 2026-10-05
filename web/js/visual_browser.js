@@ -1,5 +1,7 @@
 import { app } from "../../../scripts/app.js";
 
+console.log("[geniusewzq] v1.3.0 loaded: VisualBrowser");
+
 app.registerExtension({
     name: "geniusewzq.VisualBrowser",
     async beforeRegisterNodeDef(nodeType, nodeData) {
@@ -16,13 +18,14 @@ app.registerExtension({
                                    this.addWidget("text", "last_folder_memory", ".", (v) => {}, { serialize: true });
                 memoryWidget.type = "hidden"; 
 
-                node.viewMode = node.viewMode || "large";
+                node.viewMode = node.viewMode || "list";
                 node.sortMode = node.sortMode || "name_asc";
                 node.sidebarWidth = node.sidebarWidth || 150;
                 node.expandedFolders = node.expandedFolders || new Set(["."]);
                 node.renderedItems = new Map();
                 node.galleryData = { tree: {} };
                 node.currentPreviewIndex = -1;
+                node.refreshTimestamp = Date.now();
 
                 const mainWrapper = document.createElement("div");
                 Object.assign(mainWrapper.style, {
@@ -126,9 +129,9 @@ app.registerExtension({
 
                 const titleTag = document.createElement("div");
                 Object.assign(titleTag.style, { position:"absolute", top:"20px", left:"50%", transform:"translateX(-50%)", color:"#fff", fontSize:"14px", fontWeight:"bold", width:"50%", textAlign:"center", zIndex:10002, pointerEvents:"none" });
-                
+
                 const infoTag = document.createElement("div");
-                Object.assign(infoTag.style, { position:"absolute", bottom:"20px", left:"50%", transform:"translateX(-50%)", background:"rgba(0,236,255,0.2)", color:"#00ecff", padding:"4px 15px", borderRadius:"15px", fontSize:"12px", border:"1px solid #00ecff44", zIndex:10002, pointerEvents:"none" });
+                Object.assign(infoTag.style, { position:"absolute", top:"42px", left:"50%", transform:"translateX(-50%)", color:"#00ecff", fontSize:"12px", zIndex:10002, pointerEvents:"none" });
                 
                 const navBtnStyle = "position:absolute; top:50%; transform:translateY(-50%); cursor:pointer; background:rgba(255,255,255,0.05); color:white; border:none; border-radius:50%; width:60px; height:60px; font-size:32px; display:flex; align-items:center; justify-content:center; z-index:10002; outline:none;";
                 const prevBtn = document.createElement("button"); prevBtn.innerHTML = "‹"; prevBtn.style = navBtnStyle + "left:20px;";
@@ -137,12 +140,101 @@ app.registerExtension({
                 const imgDisplay = document.createElement("img");
                 Object.assign(imgDisplay.style, { position:"absolute", top:"50%", left:"50%", transform:"translate(-50%, -50%)", maxWidth:"75%", maxHeight:"75%", objectFit:"contain", cursor:"zoom-out", border:"1px solid #333", boxShadow:"0 0 50px rgba(0,0,0,1)", zIndex:10001 });
                 
+                // --- 底部提示词编辑区域 ---
+                const promptContainer = document.createElement("div");
+                Object.assign(promptContainer.style, {
+                    position: "absolute",
+                    bottom: "20px",
+                    left: "50%",
+                    transform: "translateX(-50%)",
+                    width: "60%",
+                    maxWidth: "600px",
+                    zIndex: 10002,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "8px"
+                });
+
+                const promptTextarea = document.createElement("textarea");
+                Object.assign(promptTextarea.style, {
+                    width: "100%",
+                    height: "80px",
+                    background: "rgba(30,30,30,0.95)",
+                    color: "#ccc",
+                    border: "1px solid #555",
+                    borderRadius: "4px",
+                    padding: "8px",
+                    fontSize: "12px",
+                    resize: "none",
+                    outline: "none"
+                });
+                promptTextarea.placeholder = "点击加载提示词...";
+
+                const saveBtn = document.createElement("button");
+                saveBtn.innerText = "💾 保存提示词";
+                Object.assign(saveBtn.style, {
+                    alignSelf: "flex-end",
+                    padding: "6px 16px",
+                    background: "#2a5a3a",
+                    color: "#4caf50",
+                    border: "1px solid #4caf50",
+                    borderRadius: "4px",
+                    cursor: "pointer",
+                    fontSize: "12px",
+                    fontWeight: "bold"
+                });
+
+                // 保存提示词功能
+                saveBtn.onclick = async (e) => {
+                    e.stopPropagation();
+                    const currentImgPath = imageWidget.value;
+                    if (!currentImgPath) return;
+
+                    saveBtn.innerText = "保存中...";
+                    saveBtn.style.opacity = "0.7";
+
+                    try {
+                        const res = await fetch("/geniusewzq/save_prompt", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                                path: currentImgPath,
+                                content: promptTextarea.value
+                            })
+                        });
+                        const result = await res.json();
+                        if (result.success) {
+                            saveBtn.innerText = "✓ 已保存";
+                            saveBtn.style.background = "#2a5a3a";
+                            setTimeout(() => {
+                                saveBtn.innerText = "💾 保存提示词";
+                                saveBtn.style.opacity = "1";
+                            }, 1500);
+                        } else {
+                            throw new Error(result.error || "保存失败");
+                        }
+                    } catch (err) {
+                        console.error("保存提示词失败:", err);
+                        saveBtn.innerText = "✗ 保存失败";
+                        saveBtn.style.background = "#5a2a2a";
+                        setTimeout(() => {
+                            saveBtn.innerText = "💾 保存提示词";
+                            saveBtn.style.background = "#2a5a3a";
+                            saveBtn.style.opacity = "1";
+                        }, 2000);
+                    }
+                };
+
+                promptContainer.appendChild(promptTextarea);
+                promptContainer.appendChild(saveBtn);
+
                 overlay.appendChild(delBtn);
-                overlay.appendChild(titleTag); 
-                overlay.appendChild(infoTag); 
-                overlay.appendChild(prevBtn); 
-                overlay.appendChild(nextBtn); 
+                overlay.appendChild(titleTag);
+                overlay.appendChild(infoTag);
+                overlay.appendChild(prevBtn);
+                overlay.appendChild(nextBtn);
                 overlay.appendChild(imgDisplay);
+                overlay.appendChild(promptContainer);
                 mainWrapper.appendChild(overlay);
 
                 // --- 键盘事件 ---
@@ -161,7 +253,7 @@ app.registerExtension({
                 node.onRemoved = () => { window.removeEventListener("keydown", handleKeyDown); if (onRemoved) onRemoved.apply(node, arguments); };
 
                 // --- 基础 UI 渲染 ---
-                const updateOverlayImage = (index) => {
+                const updateOverlayImage = async (index) => {
                     const images = getSortedImages();
                     if (index < 0 || index >= images.length) return;
                     node.currentPreviewIndex = index;
@@ -173,8 +265,24 @@ app.registerExtension({
                     node.setDirtyCanvas(true, true);
                     updateVirtualScroll();
                     imgDisplay.style.opacity = "0.3";
+
+                    // 自动加载提示词
+                    promptTextarea.value = "";
+                    promptTextarea.placeholder = "加载中...";
+                    try {
+                        const res = await fetch(`/geniusewzq/get_prompt?path=${encodeURIComponent(fullPath)}`);
+                        const data = await res.json();
+                        promptTextarea.value = data.content || "";
+                        if (!data.content) {
+                            promptTextarea.placeholder = "暂无提示词，在此输入...";
+                        }
+                    } catch (err) {
+                        console.error("加载提示词失败:", err);
+                        promptTextarea.placeholder = "加载失败，可手动输入...";
+                    }
+
                     const tImg = new Image();
-                    tImg.src = `/geniusewzq/view_image?path=${encodeURIComponent(fullPath)}`;
+                    tImg.src = `/geniusewzq/view_image?path=${encodeURIComponent(fullPath)}&t=${Date.now()}`;
                     tImg.onload = () => {
                         titleTag.innerText = imgName;
                         infoTag.innerText = `${tImg.naturalWidth} × ${tImg.naturalHeight}`;
@@ -272,10 +380,10 @@ app.registerExtension({
                     const images = getSortedImages();
                     const isList = node.viewMode === "list";
                     const cols = isList ? 1 : 3; 
-                    const gap = 10; const padding = 10;
+                    const gap = isList ? 2 : 10; const padding = 10;
                     const viewWidth = viewport.clientWidth || 450;
                     const itemWidth = isList ? (viewWidth - 25) : (viewWidth - (padding * 2) - (gap * (cols - 1))) / cols;
-                    const rowHeight = (isList ? 32 : itemWidth) + gap;
+                    const rowHeight = (isList ? 20 : itemWidth) + gap;
                     ghostContent.style.height = (Math.ceil(images.length / cols) * rowHeight + padding * 2) + "px";
                     const scrollTop = viewport.scrollTop;
                     const startRow = Math.max(0, Math.floor((scrollTop - padding) / rowHeight) - 1);
@@ -297,11 +405,11 @@ app.registerExtension({
                             const box = document.createElement("div");
                             box.style = `position:absolute; pointer-events:auto; overflow:hidden; box-sizing:border-box;`;
                             if (isList) {
-                                box.style.lineHeight = "32px"; box.style.padding = "0 10px"; box.style.fontSize = "12px"; box.style.borderBottom = "1px solid #222"; box.innerText = imgName;
+                                box.style.lineHeight = "20px"; box.style.padding = "0 10px"; box.style.fontSize = "12px"; box.innerText = imgName;
                             } else {
                                 box.style.background = "#222"; box.style.borderRadius = "4px";
                                 const img = document.createElement("img"); img.style = "width:100%; height:100%; object-fit:cover; display:block; opacity:0; transition:opacity 0.3s;";
-                                img.src = `/geniusewzq/view_image?path=${encodeURIComponent(fullPath)}`; img.onload = () => img.style.opacity = "1";
+                                img.src = `/geniusewzq/view_image?path=${encodeURIComponent(fullPath)}&t=${node.refreshTimestamp}`; img.onload = () => img.style.opacity = "1";
                                 box.appendChild(img);
                             }
                             box.onclick = () => {
@@ -318,7 +426,7 @@ app.registerExtension({
                             itemContainer.appendChild(box); node.renderedItems.set(fullPath, box);
                         }
                         const box = node.renderedItems.get(fullPath);
-                        box.style.width = `${itemWidth}px`; box.style.height = `${isList ? 32 : itemWidth}px`;
+                        box.style.width = `${itemWidth}px`; box.style.height = `${isList ? 20 : itemWidth}px`;
                         box.style.transform = `translate(${x}px, ${y}px)`;
                         if (isList) {
                             box.style.color = isSelected ? "#00ecff" : "#ccc"; box.style.background = isSelected ? "#2a2a2a" : "transparent";
@@ -336,6 +444,8 @@ app.registerExtension({
                     if(!currentPath) return;
                     showLoading(`<div style="margin-bottom:10px; font-size:24px;">⌛</div><div>同步中...</div>`);
                     try {
+                        // 更新时间戳，强制刷新图片缓存
+                        node.refreshTimestamp = Date.now();
                         const res = await fetch(`/geniusewzq/get_gallery?path=${encodeURIComponent(currentPath)}&t=${Date.now()}`);
                         node.galleryData = await res.json();
                         renderSidebar();
@@ -363,6 +473,132 @@ app.registerExtension({
                     node.sidebarWidth = newWidth; sidebar.style.width = `${newWidth}px`; updateVirtualScroll();
                 });
                 window.addEventListener("mouseup", () => { isResizing = false; document.body.style.cursor = "default"; });
+
+                // --- 拖拽上传功能 ---
+                const setupDragAndDrop = () => {
+                    // 阻止默认拖拽行为
+                    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+                        mainWrapper.addEventListener(eventName, (e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                        }, false);
+                    });
+
+                    // 拖拽进入时的视觉反馈
+                    mainWrapper.addEventListener('dragenter', () => {
+                        mainWrapper.style.border = '2px dashed #00ecff';
+                    });
+
+                    mainWrapper.addEventListener('dragleave', () => {
+                        mainWrapper.style.border = '1px solid #444';
+                    });
+
+                    // 处理拖放
+                    mainWrapper.addEventListener('drop', async (e) => {
+                        mainWrapper.style.border = '1px solid #444';
+                        const files = e.dataTransfer.files;
+                        await handleImageFiles(files);
+                    });
+                };
+
+                // --- 粘贴上传功能 ---
+                const setupPaste = () => {
+                    document.addEventListener('paste', async (e) => {
+                        // 只有当节点被选中时才处理粘贴
+                        if (!node.selected) return;
+                        
+                        const items = e.clipboardData.items;
+                        const imageFiles = [];
+                        
+                        for (let i = 0; i < items.length; i++) {
+                            if (items[i].type.indexOf('image') !== -1) {
+                                const blob = items[i].getAsFile();
+                                imageFiles.push(blob);
+                            }
+                        }
+                        
+                        if (imageFiles.length > 0) {
+                            await handleImageFiles(imageFiles);
+                        }
+                    });
+                };
+
+                // --- 处理图片文件上传 ---
+                const handleImageFiles = async (files) => {
+                    const currentPath = pathWidget.value?.trim();
+                    const folder = memoryWidget.value || ".";
+                    const targetDir = `${currentPath}/${folder}`.replace(/\/+/g, '/');
+                    
+                    if (!currentPath) {
+                        alert("请先设置基础目录");
+                        return;
+                    }
+
+                    showLoading(`<div style="font-size:24px; margin-bottom:10px;">📤</div><div>正在上传...</div>`);
+                    
+                    const uploadedFiles = [];
+                    
+                    for (const file of files) {
+                        if (!file.type.startsWith('image/')) continue;
+                        
+                        const formData = new FormData();
+                        formData.append('image', file);
+                        formData.append('targetDir', targetDir);
+                        
+                        try {
+                            const res = await fetch('/geniusewzq/upload_image', {
+                                method: 'POST',
+                                body: formData
+                            });
+                            const result = await res.json();
+                            if (result.success) {
+                                uploadedFiles.push(result.filename);
+                            } else {
+                                console.error('上传失败:', result.error);
+                            }
+                        } catch (err) {
+                            console.error('上传出错:', err);
+                        }
+                    }
+                    
+                    hideLoading();
+                    
+                    if (uploadedFiles.length > 0) {
+                        // 刷新画廊
+                        await refreshGallery();
+                        // 选中新上传的第一张图片
+                        const lastUploaded = uploadedFiles[uploadedFiles.length - 1];
+                        selectImageByName(lastUploaded);
+                    }
+                };
+
+                // --- 根据图片名称选择图片 ---
+                const selectImageByName = (imgName) => {
+                    const images = getSortedImages();
+                    const index = images.indexOf(imgName);
+                    if (index !== -1) {
+                        const folder = memoryWidget.value || ".";
+                        const currentPath = pathWidget.value.trim();
+                        const fullPath = `${currentPath}/${folder}/${imgName}`.replace(/\/+/g, '/');
+                        imageWidget.value = fullPath;
+                        if (imageWidget.callback) imageWidget.callback(fullPath);
+                        node.setDirtyCanvas(true, true);
+                        updateVirtualScroll();
+                        // 滚动到新图片位置
+                        const isList = node.viewMode === "list";
+                        const cols = isList ? 1 : 3;
+                        const gap = isList ? 2 : 10;
+                        const padding = 10;
+                        const viewWidth = viewport.clientWidth || 450;
+                        const itemWidth = isList ? (viewWidth - 25) : (viewWidth - (padding * 2) - (gap * (cols - 1))) / cols;
+                        const rowHeight = (isList ? 20 : itemWidth) + gap;
+                        const rowIndex = Math.floor(index / cols);
+                        viewport.scrollTop = rowIndex * rowHeight;
+                    }
+                };
+
+                setupDragAndDrop();
+                setupPaste();
 
                 setTimeout(refreshGallery, 500); this.setSize([650, 650]);
             };

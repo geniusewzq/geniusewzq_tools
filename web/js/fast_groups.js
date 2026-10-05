@@ -1,5 +1,7 @@
 import { app } from "../../../scripts/app.js";
 
+console.log("[geniusewzq] v1.3.0 loaded: FastGroupsBypasser");
+
 app.registerExtension({
     name: "Geniusewzq.FastGroupsBypasser",
     async beforeRegisterNodeDef(nodeType, nodeData, app) {

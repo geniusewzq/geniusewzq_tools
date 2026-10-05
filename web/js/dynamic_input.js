@@ -1,5 +1,7 @@
 import { app } from "../../../scripts/app.js";
 
+console.log("[geniusewzq] v1.3.0 loaded: DynamicPromptChain");
+
 app.registerExtension({
     name: "geniusewzq.DynamicPromptChain",
     async beforeRegisterNodeDef(nodeType, nodeData) {
