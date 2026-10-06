@@ -113,12 +113,14 @@ async def get_gallery(request):
     tree = {}
     try:
         for root, dirs, files in os.walk(path):
+            # 目录排序，保证前端树顺序稳定
+            dirs.sort()
             rel_path = os.path.relpath(root, path)
             # 筛选图片文件
             images = [f for f in files if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.bmp'))]
-            if images:
-                safe_rel_path = rel_path.replace("\\", "/")
-                tree[safe_rel_path] = sorted(images)
+            # 所有目录都进树（包括空文件夹，便于上传图片时找到它）；无图则为空列表
+            safe_rel_path = rel_path.replace("\\", "/")
+            tree[safe_rel_path] = sorted(images)
     except Exception as e:
         return web.json_response({"error": str(e), "tree": {}})
             

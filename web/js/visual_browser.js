@@ -1,6 +1,6 @@
 import { app } from "../../../scripts/app.js";
 
-console.log("[geniusewzq] v1.3.0 loaded: VisualBrowser");
+console.log("[geniusewzq] v1.4.1 loaded: VisualBrowser");
 
 app.registerExtension({
     name: "geniusewzq.VisualBrowser",
@@ -387,7 +387,7 @@ app.registerExtension({
                     ghostContent.style.height = (Math.ceil(images.length / cols) * rowHeight + padding * 2) + "px";
                     const scrollTop = viewport.scrollTop;
                     const startRow = Math.max(0, Math.floor((scrollTop - padding) / rowHeight) - 1);
-                    const endRow = Math.min(Math.ceil(images.length / cols), startRow + (Math.ceil(viewport.clientHeight / rowHeight) + 2));
+                    const endRow = Math.min(Math.ceil(images.length / cols), startRow + (Math.ceil((viewport.clientHeight || 600) / rowHeight) + 2));
                     const startIndex = startRow * cols;
                     const endIndex = Math.min(images.length, endRow * cols);
                     const currentVisibleKeys = new Set();
@@ -450,6 +450,10 @@ app.registerExtension({
                         node.galleryData = await res.json();
                         renderSidebar();
                         clearAndRefresh();
+                        // 首次打开时 DOM 可能尚未完成布局（viewport.clientHeight=0/偏小），
+                        // 等下一帧及稍后布局稳定后各重算一次，避免列表只渲染前几行
+                        requestAnimationFrame(() => updateVirtualScroll());
+                        setTimeout(() => updateVirtualScroll(), 120);
                     } catch (e) { console.error(e); } finally { hideLoading(); }
                 };
 
@@ -462,6 +466,17 @@ app.registerExtension({
                 this.addDOMWidget("gallery_ui", "HTML", mainWrapper);
                 pathWidget.callback = refreshGallery;
                 node.onResize = () => { if (node.resizeTimer) clearTimeout(node.resizeTimer); node.resizeTimer = setTimeout(() => updateVirtualScroll(), 60); };
+
+                // 视口尺寸变化（含首次布局完成、侧栏拖拽、节点缩放）→ 自动重算可见行，
+                // 从根本上避免“刚打开时列表只显示一部分”
+                if (window.ResizeObserver) {
+                    const ro = new ResizeObserver(() => {
+                        if (node.resizeTimer) clearTimeout(node.resizeTimer);
+                        node.resizeTimer = setTimeout(() => updateVirtualScroll(), 60);
+                    });
+                    ro.observe(viewport);
+                    node._gswqGalleryResizeObserver = ro;
+                }
                 
                 let isResizing = false;
                 resizer.onmousedown = (e) => { isResizing = true; document.body.style.cursor = "col-resize"; e.preventDefault(); };
