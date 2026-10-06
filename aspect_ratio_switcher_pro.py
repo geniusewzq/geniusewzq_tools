@@ -9,8 +9,8 @@
   决策5  节点显示名「比例切换器 Pro」
   决策6  无 batch_size（固定 1 张；多张用下游 Latent 重复节点）
   决策7  控件名/选项/输出口全部中文
-  决策8  宽/高 输出的总原则：任何模式下都输出当时实际输出的那张 Latent 的真实宽高
-         透传 +「对调宽高」= 真实转置输入 Latent（不只是改数字）
+  决策8  只输出 Latent（2026-10-06 用户决定：移除「真实宽/真实高」两个 INT 输出口
+         及行内显示标签）；透传 +「对调宽高」= 真实转置输入 Latent
   决策9  「Latent来源」控件置顶；未连输入锁定为自建；连入自动开启（前端驱动）；
          后端兜底：开关开着但输入为空 → 自动按自建处理，不报错
   决策10 「尺寸模式」= 开关（开=手动自定义）；「宽高比」= 下拉菜单
@@ -72,11 +72,11 @@ class AspectRatioSwitcherPro:
             },
         }
 
-    RETURN_TYPES = ("INT", "INT", "LATENT")
-    RETURN_NAMES = ("真实宽", "真实高", "Latent")
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("Latent",)
     FUNCTION = "switch"
     CATEGORY = "geniusewzq_tools"
-    DESCRIPTION = "比例切换器 Pro：百万像素+宽高比+倍数 一步算出尺寸并生成 Flux2 口径 16 通道空 Latent；或透传输入 Latent（对调宽高会真实转置）。宽/高输出永远是实际 Latent 的真实尺寸。"
+    DESCRIPTION = "比例切换器 Pro：百万像素+宽高比+倍数 一步算出尺寸并生成 Flux2 口径 16 通道空 Latent；或透传输入 Latent（对调宽高会真实转置）。"
 
     def switch(self, **kwargs):
         latent_source = bool(kwargs.get("Latent来源", False))
@@ -92,14 +92,10 @@ class AspectRatioSwitcherPro:
         # ---------- 透传模式（决策 8/9） ----------
         if latent_source and input_latent is not None:
             samples = input_latent["samples"]
-            _, _, latent_h, latent_w = samples.shape
-            w = latent_w * 8
-            h = latent_h * 8
             if swap:
-                # 真实转置：画面横竖对调，宽/高输出转置后的真实尺寸
+                # 真实转置：画面横竖对调
                 samples = torch.transpose(samples, -2, -1).contiguous()
-                w, h = h, w
-            return (w, h, {"samples": samples})
+            return ({"samples": samples},)
 
         # ---------- 自建空白 Latent ----------
         # 兜底（决策 9）：透传开着但输入为空（断链等边缘情况）→ 自动落到这里，不报错
@@ -135,4 +131,4 @@ class AspectRatioSwitcherPro:
 
         # 决策 2：写死 16 通道；决策 6：固定 1 张
         latent = torch.zeros([1, 16, h // 8, w // 8])
-        return (w, h, {"samples": latent})
+        return ({"samples": latent},)
