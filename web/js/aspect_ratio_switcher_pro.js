@@ -11,11 +11,11 @@ console.log("[geniusewzq] v1.4.0 loaded: AspectRatioSwitcherPro");
     const style = document.createElement("style");
     style.id = "gswq-pro-style";
     style.textContent = `
-        /* 置灰：只作用于行的内容层，行内「真实宽/真实高」标签永不置灰 */
+        /* 置灰：只作用于行的内容层，行内「真实宽/真实高」标签永不置灰（DOM 渲染模式） */
         .gswq-dim { opacity: .38 !important; pointer-events: none !important; }
         /* 置灰行的底板同步变暗（与整行灰的行观感一致） */
         .gswq-hasdim { background-color: rgba(58,58,66,.38) !important; }
-        /* 行内标签：文字白色 + 数值绿色（严格对齐模拟页 out-tag） */
+        /* 行内标签：文字白色 + 数值绿色（严格对齐模拟页 out-tag，DOM 模式） */
         .gswq-tag {
             position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
             display: flex; align-items: center; gap: 5px;
@@ -27,6 +27,53 @@ console.log("[geniusewzq] v1.4.0 loaded: AspectRatioSwitcherPro");
     `;
     document.head.appendChild(style);
 })();
+
+// ---------- 画布工具：圆角矩形（兼容旧前端无 roundRect） ----------
+function roundRectPath(ctx, x, y, w, h, r) {
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+}
+
+// 画布版「真实宽/真实高」胶囊标签（白字 + 绿数字，深色胶囊，严格对齐模拟页）
+function drawRealTag(ctx, node, y, h, label, value, rightEdge) {
+    ctx.save();
+    ctx.font = "12px 'Segoe UI', sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "left";
+    const padX = 7, gap = 5;
+    const wLabel = ctx.measureText(label).width;
+    const valText = value == null ? "──" : String(value);
+    const wVal = ctx.measureText(valText).width;
+    const tw = padX * 2 + wLabel + gap + wVal;
+    const th = 19;
+    const tx = node.size[0] - rightEdge - tw;
+    const ty = y + (h - th) / 2;
+    ctx.fillStyle = "rgba(30,30,34,.72)";
+    roundRectPath(ctx, tx, ty, tw, th, 8);
+    ctx.fill();
+    ctx.fillStyle = "#ececec";
+    ctx.fillText(label, tx + padX, y + h / 2 + 0.5);
+    ctx.fillStyle = "#8ee06a";
+    ctx.fillText(valText, tx + padX + wLabel + gap, y + h / 2 + 0.5);
+    ctx.restore();
+}
+
+// 画布版：补绘被 disabled 隐藏的控件原值（暗灰但可见，对齐模拟页"灰行仍显示原值"）
+function drawDimmedValue(ctx, node, y, h, text, rightEdge) {
+    ctx.save();
+    ctx.font = "12px 'Segoe UI', sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "right";
+    ctx.fillStyle = "rgba(236,236,236,.45)";
+    ctx.fillText(text, node.size[0] - rightEdge, y + h / 2 + 0.5);
+    ctx.restore();
+}
 
 // ---------- 计算口径（与后端 aspect_ratio_switcher_pro.py 完全一致） ----------
 const RATIOS = {
@@ -100,8 +147,20 @@ app.registerExtension({
             const okH = injectTag(byName["自定义高度"], "真实高");
             node._gswqInlineTags = okW && okH;
             if (!node._gswqInlineTags) {
-                console.warn("[geniusewzq] Pro：行内标签注入失败（当前前端控件为画布渲染），显示将留待回退方案");
+                console.info("[geniusewzq] Pro：当前为画布渲染控件，行内标签改由画布绘制");
             }
+
+            // ---- 画布渲染：包装每个控件的 draw，精确记录行坐标（供前景层补绘） ----
+            (node.widgets || []).forEach((w) => {
+                if (w._gswqWrapped || typeof w.draw !== "function") return;
+                w._gswqWrapped = true;
+                const origDraw = w.draw;
+                w.draw = function (ctx, n, width, y, height) {
+                    w._gswqY = y;
+                    w._gswqH = height;
+                    return origDraw.apply(this, arguments);
+                };
+            });
 
             // ---- 置灰联动：只灰「内容层」，标签永不灰（决策：置灰只作用于输入） ----
             const lock = (widget, off) => {
@@ -169,6 +228,9 @@ app.registerExtension({
                 };
                 setTag(byName["自定义宽度"], w);
                 setTag(byName["自定义高度"], h);
+                // 供画布前景层绘制使用（透传时为 null → 显示 ──）
+                node._gswqRealW = w;
+                node._gswqRealH = h;
             };
 
             // ---- 控件联动回调 ----
@@ -208,6 +270,40 @@ app.registerExtension({
             node._gswqApplyLocks();
             node._gswqUpdate();
             return created;
+        };
+
+        // ---- 画布前景层：补绘被 disabled 隐藏的值 + 行内「真实宽/真实高」胶囊 ----
+        const onDrawForeground = nodeType.prototype.onDrawForeground;
+        nodeType.prototype.onDrawForeground = function (ctx) {
+            onDrawForeground?.apply(this, arguments);
+            const byName = this._gswqW;
+            if (this.flags?.collapsed || !byName || this._gswqInlineTags) return;
+
+            const fmt = {
+                "宽高比": (w) => String(w.value),
+                "百万像素": (w) => Number(w.value).toFixed(1),
+                "倍数": (w) => String(w.value),
+                "尺寸模式": (w) => (w.value === true ? "手动自定义" : "百万像素比例"),
+                "Latent来源": (w) => (w.value === true ? "使用输入Latent" : "节点自建空白Latent"),
+            };
+            Object.entries(fmt).forEach(([name, fn]) => {
+                const w = byName[name];
+                if (!w || w.disabled !== true || w._gswqY == null) return;
+                // 开关型控件的文字在圆点左侧（预留 42px），其余类型贴右边缘
+                const edge = w.type === "toggle" ? 42 : 14;
+                drawDimmedValue(ctx, this, w._gswqY, w._gswqH, fn(w), edge);
+            });
+
+            // 行内「真实宽/真实高」：永不置灰。手动可编辑时右移给原生数值让位
+            const manual = byName["尺寸模式"].value === true;
+            const pass = byName["Latent来源"].value === true;
+            const cw = byName["自定义宽度"], ch = byName["自定义高度"];
+            if (cw?._gswqY != null) {
+                drawRealTag(ctx, this, cw._gswqY, cw._gswqH, "真实宽", this._gswqRealW, !pass && manual ? 76 : 14);
+            }
+            if (ch?._gswqY != null) {
+                drawRealTag(ctx, this, ch._gswqY, ch._gswqH, "真实高", this._gswqRealH, !pass && manual ? 76 : 14);
+            }
         };
 
         // ---- 决策 9：Latent 输入连入→自动开启透传；断开→锁定回自建 ----
