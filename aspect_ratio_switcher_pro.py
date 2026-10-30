@@ -56,7 +56,7 @@ class AspectRatioSwitcherPro:
                 }),
                 # 决策 10：下拉菜单形态
                 "宽高比": ([name for name, _, _ in RATIO_OPTIONS], {"default": "16:9 宽屏"}),
-                "百万像素": ("FLOAT", {"default": 4.0, "min": 0.1, "max": 16.0, "step": 0.1}),
+                "百万像素": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 16.0, "step": 0.1}),
                 "倍数": ("INT", {"default": 32, "min": 8, "max": 128, "step": 8}),
                 "自定义宽度": ("INT", {"default": 1024, "min": 64, "max": MAX_SIDE, "step": 8}),
                 "自定义高度": ("INT", {"default": 1024, "min": 64, "max": MAX_SIDE, "step": 8}),
@@ -82,7 +82,7 @@ class AspectRatioSwitcherPro:
         latent_source = bool(kwargs.get("Latent来源", False))
         size_mode = bool(kwargs.get("尺寸模式", False))
         ratio_name = kwargs.get("宽高比", "16:9 宽屏")
-        megapixels = float(kwargs.get("百万像素", 4.0))
+        megapixels = float(kwargs.get("百万像素", 1.0))
         multiple = int(kwargs.get("倍数", 32))
         custom_w = int(kwargs.get("自定义宽度", 1024))
         custom_h = int(kwargs.get("自定义高度", 1024))
@@ -132,3 +132,4 @@ class AspectRatioSwitcherPro:
         # 决策 2：写死 16 通道；决策 6：固定 1 张
         latent = torch.zeros([1, 16, h // 8, w // 8])
         return ({"samples": latent},)
+

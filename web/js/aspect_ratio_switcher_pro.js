@@ -5,7 +5,7 @@
 // 因此用「独立浮层」补绘灰行原值（不受 Vue 重渲染影响）；旧画布渲染前端自动回退前景绘制。
 import { app } from "../../../scripts/app.js";
 
-console.log("[geniusewzq] v1.4.1 loaded: AspectRatioSwitcherPro");
+console.log("[geniusewzq] v1.4.5 loaded: AspectRatioSwitcherPro");
 
 // ---------- 浮层样式（一次注入） ----------
 (function injectStyle() {
@@ -18,6 +18,21 @@ console.log("[geniusewzq] v1.4.1 loaded: AspectRatioSwitcherPro");
             position: fixed; font-family: 'Segoe UI', sans-serif;
             color: rgba(236,236,236,.45); white-space: nowrap;
             pointer-events: none; z-index: 9989;
+        }
+        /* 底部只读行：真实输出分辨率 */
+        .gswq-readout {
+            display: flex; align-items: center; justify-content: space-between;
+            gap: 8px; box-sizing: border-box; height: 26px; padding: 0 10px;
+            font: 12px/26px 'Segoe UI', 'Microsoft YaHei', sans-serif;
+            color: rgba(236,236,236,.92); white-space: nowrap; overflow: hidden;
+            border-top: 1px solid rgba(255,255,255,.10);
+            user-select: none; cursor: default;
+        }
+        .gswq-readout .gswq-readout-label { color: rgba(236,236,236,.55); flex: 0 0 auto; }
+        .gswq-readout .gswq-readout-value {
+            flex: 1 1 auto; text-align: right; overflow: hidden;
+            text-overflow: ellipsis; font-variant-numeric: tabular-nums;
+            color: rgba(236,236,236,.96);
         }
     `;
     document.head.appendChild(style);
@@ -79,6 +94,68 @@ const RATIOS = {
 const MAX_SIDE = 16384;
 const roundTo = (v, m) => Math.max(m, Math.min(MAX_SIDE, Math.round(v / m) * m));
 
+// ---------- 记住最后一次操作（跨启动 / 跨工作流保留） ----------
+// 只记「用户会反复调的那几项」；Latent来源 由连线状态自动决定，不记。
+const LAST_KEY = "geniusewzq.arsp.last.v1";
+const PERSIST_FIELDS = ["尺寸模式", "宽高比", "百万像素", "倍数", "自定义宽度", "自定义高度", "输出方向"];
+
+function loadLastUsed() {
+    try {
+        const raw = localStorage.getItem(LAST_KEY);
+        if (!raw) return null;
+        const data = JSON.parse(raw);
+        return data && typeof data === "object" ? data : null;
+    } catch (e) {
+        return null; // 隐私模式 / 脏数据：按未记住处理
+    }
+}
+
+function saveLastUsed(widgets) {
+    try {
+        const out = {};
+        for (const name of PERSIST_FIELDS) {
+            const w = widgets[name];
+            if (w) out[name] = w.value;
+        }
+        localStorage.setItem(LAST_KEY, JSON.stringify(out));
+    } catch (e) { /* 写入失败不影响使用 */ }
+}
+
+// 把记住的值安全套回控件：越界夹紧、失效选项忽略、类型不符忽略
+function applyLastUsed(widgets, saved) {
+    if (!saved) return;
+    const bool = (w, v) => (typeof v === "boolean" ? v : undefined);
+    const combo = (w, v) => {
+        const list = w.options?.values;
+        if (Array.isArray(list) && list.length && !list.includes(v)) return undefined;
+        return typeof v === "string" ? v : undefined;
+    };
+    const num = (w, v) => {
+        const n = Number(v);
+        if (!Number.isFinite(n)) return undefined;
+        const min = Number.isFinite(w.options?.min) ? w.options.min : -Infinity;
+        const max = Number.isFinite(w.options?.max) ? w.options.max : Infinity;
+        const out = Math.min(max, Math.max(min, n));
+        const p = Number.isInteger(w.options?.precision) ? w.options.precision : null;
+        return p === null ? out : Number(out.toFixed(p));
+    };
+    const rules = {
+        "尺寸模式": bool,
+        "宽高比": combo,
+        "百万像素": num,
+        "倍数": num,
+        "自定义宽度": num,
+        "自定义高度": num,
+        "输出方向": bool,
+    };
+    for (const [name, coerce] of Object.entries(rules)) {
+        const w = widgets[name];
+        if (!w || saved[name] === undefined) continue;
+        const v = coerce(w, saved[name]);
+        if (v !== undefined) w.value = v;
+    }
+}
+
 // 需要在置灰时补绘原值的控件（开关型原生保留文字，不用补）
 const DIM_FORMATTERS = {
     "宽高比": (w) => String(w.value),
@@ -123,6 +200,12 @@ app.registerExtension({
             byName["Latent来源"].disabled = true;
             byName["Latent来源"].value = false;
 
+            // ---- 记住最后一次操作：新节点沿用上次的选择 ----
+            // 载入工作流时 configure() 随后会用工作流里的值覆盖，因此只影响「新建」的节点
+            applyLastUsed(byName, loadLastUsed());
+            node._gswqRestoring = true; // 还原期间不回写，避免把旧工作流的旧值当成「最后一次操作」
+            setTimeout(() => { node._gswqRestoring = false; }, 400);
+
             // 画布坐标记录（回退路径用）
             (node.widgets || []).forEach((w) => {
                 if (w._gswqWrapped || typeof w.draw !== "function") return;
@@ -157,12 +240,38 @@ app.registerExtension({
                     ];
                 }
                 const [rw, rh] = RATIOS[byName["宽高比"].value] || [16, 9];
-                const mp = Math.min(16, Math.max(0.1, Number(byName["百万像素"].value) || 4));
+                const mp = Math.min(16, Math.max(0.1, Number(byName["百万像素"].value) || 1));
                 const scale = Math.sqrt((mp * 1048576) / (rw * rh));
                 return [roundTo(rw * scale, mult), roundTo(rh * scale, mult)];
             };
 
             let backfilling = false;
+            // 只有「用户真的动了控件」才写回记忆值
+            const persist = () => {
+                if (node._gswqRestoring) return;
+                saveLastUsed(byName);
+            };
+            node._gswqPersist = persist;
+            // 延迟一拍再写回：控件常常「先回调、后赋值」，等一拍才读得到新值；顺带合并拖动时的连续改动
+            let persistTimer = null;
+            const persistSoon = () => {
+                if (persistTimer) clearTimeout(persistTimer);
+                persistTimer = setTimeout(() => {
+                    persistTimer = null;
+                    persist();
+                }, 120);
+            };
+            // 兜底监听：不依赖各控件回调的实现细节，值一变就在下一帧写回
+            const snapKey = () => PERSIST_FIELDS.map((n) => String(byName[n]?.value)).join("|");
+            let lastSnap = snapKey();
+            node._gswqResetSnap = () => { lastSnap = snapKey(); };
+            node._gswqWatchChanges = () => {
+                if (node._gswqRestoring) return;
+                const key = snapKey();
+                if (key === lastSnap) return;
+                lastSnap = key;
+                persist();
+            };
             node._gswqUpdate = () => {
                 if (backfilling) return;
                 const pass = byName["Latent来源"].value === true;
@@ -178,6 +287,7 @@ app.registerExtension({
                     } finally { backfilling = false; }
                 }
                 node._gswqSyncOverlay?.();
+                node._gswqSyncReadout?.();
             };
 
             // ---- 控件联动回调 ----
@@ -189,6 +299,7 @@ app.registerExtension({
                     if (extra) extra(v);
                     node._gswqApplyLocks();
                     node._gswqUpdate();
+                    persistSoon();
                     return old ? old(v) : undefined;
                 };
             };
@@ -210,6 +321,7 @@ app.registerExtension({
                 const old = widget.callback;
                 widget.callback = (v) => {
                     node._gswqUpdate();
+                    persistSoon();
                     return old ? old(v) : undefined;
                 };
             });
@@ -244,10 +356,59 @@ app.registerExtension({
                     node._gswqApplyLocks();
                     node._gswqUpdate();
                 }
+
+                node._gswqWatchChanges?.();
             };
 
+            // ---- 底部只读行：实时显示「真实输出的分辨率」 ----
+            // 用 DOM widget 承载（serialize=false → 不写入 workflows 的 widgets_values）
+            const readoutText = () => {
+                const pass = byName["Latent来源"].value === true;
+                const manual = byName["尺寸模式"].value === true;
+                const swap = byName["输出方向"].value === true;
+                const hasLink = node.inputs?.[0]?.link != null;
+                if (pass && hasLink) return swap ? "跟随输入 Latent · 已对调" : "跟随输入 Latent";
+                let [w, h] = manual ? calc(true) : calc(false);
+                if (swap) [w, h] = [h, w];
+                const mp = (w * h) / 1048576;
+                return `${w} × ${h}  ·  ${mp.toFixed(2)} MP`;
+            };
+
+            let readoutValueEl = null;
+            node._gswqSyncReadout = () => {
+                if (!readoutValueEl) return;
+                const text = readoutText();
+                if (readoutValueEl.textContent !== text) readoutValueEl.textContent = text;
+            };
+
+            if (typeof node.addDOMWidget === "function") {
+                const row = document.createElement("div");
+                row.className = "gswq-readout";
+                const label = document.createElement("span");
+                label.className = "gswq-readout-label";
+                label.textContent = "真实分辨率";
+                const value = document.createElement("span");
+                value.className = "gswq-readout-value";
+                row.append(label, value);
+                readoutValueEl = value;
+
+                const rw = node.addDOMWidget("真实分辨率", "gswq_readout", row, {
+                    serialize: false,
+                    hideOnZoom: false,
+                    margin: 4, // 默认 margin=10 会把 26px 的行压成 6px，文字溢出节点
+                    getValue: () => readoutText(),
+                    setValue: () => {},
+                });
+                rw.serialize = false;
+                rw.serializeValue = () => undefined;
+                rw.computeLayoutSize = () => ({ minHeight: 26, maxHeight: 26, minWidth: 0 });
+                node._gswqReadoutEl = row;
+            }
+
+            node._gswqReadoutText = readoutText;
             node._gswqApplyLocks();
             node._gswqUpdate();
+            node._gswqSyncReadout();
             return created;
         };
 
@@ -258,9 +419,11 @@ app.registerExtension({
             const byName = this._gswqW;
             if (!byName || this.flags?.collapsed) return;
 
-            const domMode = !!byName["自定义宽度"]?.element?.isConnected;
+            const domMode = !!byName["自定义宽度"]?.element?.isConnected
+                || !!this._gswqReadoutEl?.isConnected;
             if (domMode) {
                 this._gswqSyncOverlay?.();
+                this._gswqSyncReadout?.();
                 return;
             }
 
@@ -269,6 +432,21 @@ app.registerExtension({
                 if (!w || w.disabled !== true || w._gswqY == null) return;
                 drawDimmedValueCanvas(ctx, this, w._gswqY, w._gswqH, fn(w), 56);
             });
+
+            // 旧画布前端没有 DOM widget：直接在节点底部画一行
+            const text = this._gswqReadoutText?.();
+            if (text) {
+                ctx.save();
+                ctx.font = "12px 'Segoe UI', sans-serif";
+                ctx.textBaseline = "middle";
+                ctx.textAlign = "left";
+                ctx.fillStyle = "rgba(236,236,236,.55)";
+                ctx.fillText("真实分辨率", 12, this.size[1] - 11);
+                ctx.textAlign = "right";
+                ctx.fillStyle = "rgba(236,236,236,.9)";
+                ctx.fillText(text, this.size[0] - 12, this.size[1] - 11);
+                ctx.restore();
+            }
         };
 
         // ---- 决策 9：Latent 输入连入→自动开启透传；断开→锁定回自建 ----
@@ -297,6 +475,8 @@ app.registerExtension({
             byName["Latent来源"].disabled = !hasLink;
             this._gswqApplyLocks?.();
             this._gswqUpdate?.();
+            this._gswqRestoring = false; // 还原结束，之后的改动才计入「最后一次操作」
+            this._gswqResetSnap?.();     // 以工作流里的值为基线，避免把旧值写回记忆
         };
 
         // ---- 节点删除时清理浮层 ----
@@ -308,3 +488,5 @@ app.registerExtension({
         };
     },
 });
+
+
