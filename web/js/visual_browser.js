@@ -1,6 +1,6 @@
-import { app } from "../../../scripts/app.js";
+﻿import { app } from "../../../scripts/app.js";
 
-console.log("[geniusewzq] v1.4.1 loaded: VisualBrowser");
+console.log("[geniusewzq] v1.5.1 loaded: VisualBrowser");
 
 app.registerExtension({
     name: "geniusewzq.VisualBrowser",
@@ -22,10 +22,36 @@ app.registerExtension({
                 node.sortMode = node.sortMode || "name_asc";
                 node.sidebarWidth = node.sidebarWidth || 150;
                 node.expandedFolders = node.expandedFolders || new Set(["."]);
+                node.navHistory = node.navHistory || [];
+                node.navIndex = node.navIndex || 0;
                 node.renderedItems = new Map();
                 node.galleryData = { tree: {} };
                 node.currentPreviewIndex = -1;
                 node.refreshTimestamp = Date.now();
+
+                // --- 输出端口配色：提示词=绿色，透明通道=灰色 ---
+                // 新前端用 color_on/color_off 渲染圆点，旧前端读取 color/bgcolor，这里全部写入以保证兼容
+                const applyOutputSlotColors = () => {
+                    if (!node.outputs) return;
+                    const paint = (slot, color) => {
+                        slot.color = color;
+                        slot.bgcolor = color;
+                        slot.color_on = color;
+                        slot.color_off = color;
+                    };
+                    node.outputs.forEach((slot) => {
+                        if (slot.name === "提示词" || slot.type === "STRING") paint(slot, "#81C784");
+                        else if (slot.name === "透明通道" || slot.type === "MASK") paint(slot, "#8c8c8c");
+                    });
+                };
+                applyOutputSlotColors();
+
+                // 旧工作流里保存的 outputs 没有颜色字段（或来自旧版本），加载后需要重新上色
+                const prevOnConfigure = node.onConfigure;
+                node.onConfigure = function () {
+                    if (prevOnConfigure) prevOnConfigure.apply(this, arguments);
+                    applyOutputSlotColors();
+                };
 
                 const mainWrapper = document.createElement("div");
                 Object.assign(mainWrapper.style, {
@@ -99,6 +125,8 @@ app.registerExtension({
                             if (overlay.style.display === "block") {
                                 overlay.style.display = "none";
                                 imgDisplay.src = "";
+                                previewState.index = -1;
+                                node.currentPreviewIndex = -1;
                             }
                             await refreshGallery(); 
                         } else {
@@ -114,7 +142,29 @@ app.registerExtension({
                 // --- 预览 Overlay ---
                 const overlay = document.createElement("div");
                 Object.assign(overlay.style, { position:"absolute", top:0, left:0, width:"100%", height:"100%", background:"rgba(0,0,0,0.95)", zIndex:10000, display:"none" });
-                
+
+                // 预览状态与“已选用”状态分离：在大图里翻页只是浏览，不会改掉节点正在用的图
+                const previewState = { index: -1 };
+                const buildFullPath = (imgName) => `${pathWidget.value.trim()}/${memoryWidget.value || "."}/${imgName}`.replace(/\/+/g, '/');
+                const getPreviewName = () => getSortedImages()[previewState.index] || null;
+                const getPreviewPath = () => { const n = getPreviewName(); return n ? buildFullPath(n) : null; };
+                const isPreviewSelected = () => { const p = getPreviewPath(); return !!p && p === imageWidget.value; };
+
+                // “使用此图”：把当前预览的图片设为节点图片（唯一会改变 image_path 的入口）
+                const useBtn = document.createElement("button");
+                useBtn.innerText = "✅ 使用此图";
+                Object.assign(useBtn.style, {
+                    position: "absolute", top: "20px", right: "140px", padding: "8px 16px",
+                    background: "#1f4d33", color: "#7ee0a0", border: "1px solid #4caf50", borderRadius: "4px",
+                    cursor: "pointer", fontSize: "12px", zIndex: 10003, fontWeight: "bold", display: "none"
+                });
+                const browseHint = document.createElement("div");
+                Object.assign(browseHint.style, {
+                    position: "absolute", top: "56px", left: "50%", transform: "translateX(-50%)",
+                    color: "#e0b060", fontSize: "11px", zIndex: 10002, pointerEvents: "none", display: "none"
+                });
+                browseHint.innerText = "浏览中（未选用）— 点“✅ 使用此图”才会替换节点图片";
+
                 const delBtn = document.createElement("button");
                 delBtn.innerHTML = "🗑️ 删除图片";
                 Object.assign(delBtn.style, {
@@ -124,7 +174,9 @@ app.registerExtension({
                 });
                 delBtn.onclick = (e) => { 
                     e.stopPropagation(); 
-                    createConfirmModal("删除确认", `文件：${imageWidget.value.split('/').pop()}`, () => performDelete(imageWidget.value));
+                    const target = getPreviewPath() || imageWidget.value;
+                    if (!target) return;
+                    createConfirmModal("删除确认", `文件：${target.split('/').pop()}`, () => performDelete(target));
                 };
 
                 const titleTag = document.createElement("div");
@@ -187,7 +239,7 @@ app.registerExtension({
                 // 保存提示词功能
                 saveBtn.onclick = async (e) => {
                     e.stopPropagation();
-                    const currentImgPath = imageWidget.value;
+                    const currentImgPath = getPreviewPath() || imageWidget.value;
                     if (!currentImgPath) return;
 
                     saveBtn.innerText = "保存中...";
@@ -204,6 +256,7 @@ app.registerExtension({
                         });
                         const result = await res.json();
                         if (result.success) {
+                            markPromptFlag(currentImgPath, promptTextarea.value.trim().length > 0);
                             saveBtn.innerText = "✓ 已保存";
                             saveBtn.style.background = "#2a5a3a";
                             setTimeout(() => {
@@ -235,47 +288,69 @@ app.registerExtension({
                 overlay.appendChild(nextBtn);
                 overlay.appendChild(imgDisplay);
                 overlay.appendChild(promptContainer);
+                overlay.appendChild(useBtn);
+                overlay.appendChild(browseHint);
                 mainWrapper.appendChild(overlay);
 
                 // --- 键盘事件 ---
+                // 注意：光标在输入框里时（编辑提示词），方向键必须交还给浏览器，否则无法移动光标
+                const isTypingTarget = (target) => {
+                    if (!target || !target.tagName) return false;
+                    const tag = target.tagName.toUpperCase();
+                    return tag === "TEXTAREA" || tag === "INPUT" || tag === "SELECT" || target.isContentEditable;
+                };
                 const handleKeyDown = (e) => {
-                    if (overlay.style.display === "block") {
-                        if (["ArrowLeft", "ArrowRight", "Escape"].includes(e.key)) {
-                            e.preventDefault(); e.stopPropagation();
-                        }
-                        if (e.key === "ArrowLeft") prevBtn.click();
-                        if (e.key === "ArrowRight") nextBtn.click();
-                        if (e.key === "Escape") imgDisplay.click();
+                    if (overlay.style.display !== "block") return;
+                    if (e.isComposing) return; // 输入法组字中不拦截
+                    if (e.key === "Escape") {
+                        e.preventDefault(); e.stopPropagation();
+                        closeOverlay();
+                        return;
                     }
+                    if (isTypingTarget(e.target)) return; // 正在输入：方向键留给光标
+                    if (e.key === "ArrowLeft") { e.preventDefault(); e.stopPropagation(); stepPreview(-1); }
+                    if (e.key === "ArrowRight") { e.preventDefault(); e.stopPropagation(); stepPreview(1); }
                 };
                 window.addEventListener("keydown", handleKeyDown);
                 const onRemoved = node.onRemoved;
                 node.onRemoved = () => { window.removeEventListener("keydown", handleKeyDown); if (onRemoved) onRemoved.apply(node, arguments); };
 
                 // --- 基础 UI 渲染 ---
-                const updateOverlayImage = async (index) => {
+                // 大图预览 = 只浏览。翻页不会写 image_path，避免“只是看看”却把节点图片换掉
+                const syncOverlayChrome = () => {
+                    const hasPreview = !!getPreviewName();
+                    const selected = hasPreview && isPreviewSelected();
+                    useBtn.style.display = selected ? "none" : "block";
+                    browseHint.style.display = selected ? "none" : "block";
                     const images = getSortedImages();
-                    if (index < 0 || index >= images.length) return;
-                    node.currentPreviewIndex = index;
-                    const imgName = images[index];
-                    const folder = memoryWidget.value || ".";
-                    const fullPath = `${pathWidget.value.trim()}/${folder}/${imgName}`.replace(/\/+/g, '/');
-                    imageWidget.value = fullPath;
-                    if (imageWidget.callback) imageWidget.callback(fullPath);
-                    node.setDirtyCanvas(true, true);
-                    updateVirtualScroll();
-                    imgDisplay.style.opacity = "0.3";
+                    const setState = (btn, enabled) => { btn.disabled = !enabled; btn.style.opacity = enabled ? "1" : "0.25"; btn.style.cursor = enabled ? "pointer" : "default"; };
+                    setState(prevBtn, previewState.index > 0);
+                    setState(nextBtn, previewState.index >= 0 && previewState.index < images.length - 1);
+                };
 
-                    // 自动加载提示词
+                const renderPreview = async (index) => {
+                    const images = getSortedImages();
+                    if (!images.length) { closeOverlay(); return; }
+                    const clamped = Math.max(0, Math.min(index, images.length - 1));
+                    previewState.index = clamped;
+                    node.currentPreviewIndex = clamped;
+                    const imgName = images[clamped];
+                    const fullPath = buildFullPath(imgName);
+                    syncOverlayChrome();
+
+                    imgDisplay.style.opacity = "0.3";
+                    titleTag.innerText = imgName;
+                    infoTag.innerText = "载入中...";
+
+                    // 自动加载提示词（只填到文本框，不动节点）
                     promptTextarea.value = "";
                     promptTextarea.placeholder = "加载中...";
                     try {
                         const res = await fetch(`/geniusewzq/get_prompt?path=${encodeURIComponent(fullPath)}`);
                         const data = await res.json();
+                        if (previewState.index !== clamped) return; // 快速翻页时丢弃过期响应
                         promptTextarea.value = data.content || "";
-                        if (!data.content) {
-                            promptTextarea.placeholder = "暂无提示词，在此输入...";
-                        }
+                        promptTextarea.placeholder = "暂无提示词，在此输入...";
                     } catch (err) {
                         console.error("加载提示词失败:", err);
                         promptTextarea.placeholder = "加载失败，可手动输入...";
@@ -284,17 +359,47 @@ app.registerExtension({
                     const tImg = new Image();
                     tImg.src = `/geniusewzq/view_image?path=${encodeURIComponent(fullPath)}&t=${Date.now()}`;
                     tImg.onload = () => {
-                        titleTag.innerText = imgName;
+                        if (previewState.index !== clamped) return;
                         infoTag.innerText = `${tImg.naturalWidth} × ${tImg.naturalHeight}`;
                         imgDisplay.src = tImg.src;
                         imgDisplay.style.opacity = "1";
                     };
                 };
 
-                imgDisplay.onclick = () => { overlay.style.display="none"; imgDisplay.src=""; };
-                overlay.onclick = (e) => { if(e.target === overlay) { overlay.style.display="none"; imgDisplay.src=""; } };
-                prevBtn.onclick = (e) => { e.stopPropagation(); updateOverlayImage(node.currentPreviewIndex - 1); };
-                nextBtn.onclick = (e) => { e.stopPropagation(); updateOverlayImage(node.currentPreviewIndex + 1); };
+                const openOverlayAt = (index) => {
+                    overlay.style.display = "block";
+                    renderPreview(index);
+                };
+                const stepPreview = (delta) => {
+                    if (overlay.style.display !== "block") return;
+                    renderPreview(previewState.index + delta);
+                };
+                // 关闭时把预览位置对齐到“已选用”的图，下次打开不会停在上次的浏览位置
+                const closeOverlay = () => {
+                    overlay.style.display = "none";
+                    imgDisplay.src = "";
+                    const images = getSortedImages();
+                    const idx = images.findIndex(n => buildFullPath(n) === imageWidget.value);
+                    previewState.index = idx;
+                    node.currentPreviewIndex = idx;
+                };
+
+                // 唯一会把“浏览的图”写成“节点使用的图”的动作
+                useBtn.onclick = (e) => {
+                    e.stopPropagation();
+                    const target = getPreviewPath();
+                    if (!target) return;
+                    imageWidget.value = target;
+                    if (imageWidget.callback) imageWidget.callback(target);
+                    node.setDirtyCanvas(true, true);
+                    updateVirtualScroll();
+                    syncOverlayChrome();
+                };
+
+                imgDisplay.onclick = () => closeOverlay();
+                overlay.onclick = (e) => { if (e.target === overlay) closeOverlay(); };
+                prevBtn.onclick = (e) => { e.stopPropagation(); stepPreview(-1); };
+                nextBtn.onclick = (e) => { e.stopPropagation(); stepPreview(1); };
 
                 const topBar = document.createElement("div");
                 topBar.style = "display:flex; padding:5px 10px; background:#252525; border-bottom:1px solid #333; flex-shrink:0; height:40px; align-items:center; gap:8px;";
@@ -313,6 +418,23 @@ app.registerExtension({
                 const refreshBtn = document.createElement("button"); refreshBtn.innerText = "🔄 刷新"; refreshBtn.style = "cursor:pointer; font-size:10px; padding:3px 10px; background:#333; color:#00ecff; border:1px solid #555; border-radius:3px; margin-left:auto;";
                 topBar.appendChild(modeGroup); topBar.appendChild(sortSelect); topBar.appendChild(refreshBtn);
 
+                // --- 资源管理器式导航栏：后退 / 前进 / 上一级 + 面包屑路径 ---
+                const navBar = document.createElement("div");
+                Object.assign(navBar.style, {
+                    display: "flex", alignItems: "center", gap: "4px", padding: "3px 8px",
+                    background: "#202020", borderBottom: "1px solid #333", flexShrink: "0", height: "28px"
+                });
+                const folderNavBtnStyle = "width:22px; height:20px; display:flex; align-items:center; justify-content:center; background:#2a2a2a; color:#ccc; border:1px solid #444; border-radius:3px; font-size:12px; cursor:pointer; padding:0; flex-shrink:0;";
+                const backBtn = document.createElement("button"); backBtn.innerText = "←"; backBtn.title = "后退"; backBtn.style = folderNavBtnStyle;
+                const forwardBtn = document.createElement("button"); forwardBtn.innerText = "→"; forwardBtn.title = "前进"; forwardBtn.style = folderNavBtnStyle;
+                const upBtn = document.createElement("button"); upBtn.innerText = "↑"; upBtn.title = "上一级文件夹"; upBtn.style = folderNavBtnStyle;
+                const crumbBar = document.createElement("div");
+                Object.assign(crumbBar.style, {
+                    display: "flex", alignItems: "center", gap: "2px", flex: "1", minWidth: "0",
+                    overflowX: "auto", overflowY: "hidden", whiteSpace: "nowrap", paddingBottom: "1px"
+                });
+                navBar.appendChild(backBtn); navBar.appendChild(forwardBtn); navBar.appendChild(upBtn); navBar.appendChild(crumbBar);
+
                 const bodyContainer = document.createElement("div");
                 bodyContainer.style = "display:flex; flex:1; overflow:hidden; position:relative;";
                 const sidebar = document.createElement("div");
@@ -325,45 +447,195 @@ app.registerExtension({
                 const itemContainer = document.createElement("div"); itemContainer.style = "position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none;";
                 viewport.appendChild(ghostContent); viewport.appendChild(itemContainer);
                 bodyContainer.appendChild(sidebar); bodyContainer.appendChild(resizer); bodyContainer.appendChild(viewport);
-                mainWrapper.appendChild(topBar); mainWrapper.appendChild(bodyContainer);
+                mainWrapper.appendChild(topBar); mainWrapper.appendChild(navBar); mainWrapper.appendChild(bodyContainer);
+
+                // --- 文件夹导航辅助：路径规范化 / 展开状态 / 面包屑 ---
+                const normalizeFolder = (p) => {
+                    let f = (p || ".").replace(/\\/g, "/").trim();
+                    f = f.replace(/^\.?\/+|\/+$/g, "");
+                    return f ? f : ".";
+                };
+                const getCurrentFolder = () => normalizeFolder(memoryWidget.value);
+                const getParentFolder = (folder) => {
+                    const f = normalizeFolder(folder);
+                    if (f === ".") return ".";
+                    const parts = f.split("/");
+                    parts.pop();
+                    return parts.length ? parts.join("/") : ".";
+                };
+                const getRootLabel = () => {
+                    const base = (pathWidget.value || "").trim().replace(/[\\/]+$/, "");
+                    if (!base) return "根目录";
+                    return base.split(/[\\/]/).filter(Boolean).pop() || "根目录";
+                };
+                const folderExists = (folder) => {
+                    const tree = node.galleryData && node.galleryData.tree;
+                    return !!tree && Object.prototype.hasOwnProperty.call(tree, folder);
+                };
+                const expandAncestors = (folder) => {
+                    node.expandedFolders.add(".");
+                    if (!folder || folder === ".") return;
+                    const parts = folder.split("/");
+                    for (let i = 1; i <= parts.length; i++) node.expandedFolders.add(parts.slice(0, i).join("/"));
+                };
+                const syncNavButtons = () => {
+                    const setEnabled = (btn, enabled) => {
+                        btn.disabled = !enabled;
+                        btn.style.opacity = enabled ? "1" : "0.35";
+                        btn.style.cursor = enabled ? "pointer" : "default";
+                    };
+                    setEnabled(backBtn, node.navIndex > 0);
+                    setEnabled(forwardBtn, node.navIndex < node.navHistory.length - 1);
+                    setEnabled(upBtn, getCurrentFolder() !== ".");
+                };
+                const renderBreadcrumb = () => {
+                    const current = getCurrentFolder();
+                    const base = (pathWidget.value || "").trim();
+                    crumbBar.innerHTML = "";
+                    const makeCrumb = (label, folder, isLast, fullPath) => {
+                        const el = document.createElement("span");
+                        el.innerText = label;
+                        el.title = fullPath;
+                        Object.assign(el.style, {
+                            padding: "2px 6px", borderRadius: "3px", fontSize: "11px",
+                            color: isLast ? "#eeeeee" : "#8ab4c8",
+                            background: isLast ? "#2c2c2c" : "transparent",
+                            cursor: isLast ? "default" : "pointer",
+                            maxWidth: "180px", overflow: "hidden", textOverflow: "ellipsis", flexShrink: "0"
+                        });
+                        if (!isLast) {
+                            el.onmouseenter = () => { el.style.background = "#333333"; el.style.color = "#00ecff"; };
+                            el.onmouseleave = () => { el.style.background = "transparent"; el.style.color = "#8ab4c8"; };
+                            el.onclick = (e) => { e.stopPropagation(); applyFolder(folder); };
+                        }
+                        crumbBar.appendChild(el);
+                    };
+                    makeCrumb(getRootLabel(), ".", current === ".", base || "根目录");
+                    if (current !== ".") {
+                        const parts = current.split("/");
+                        parts.forEach((part, i) => {
+                            const sep = document.createElement("span");
+                            sep.innerText = "›";
+                            sep.style = "color:#555; font-size:10px; flex-shrink:0;";
+                            crumbBar.appendChild(sep);
+                            const folder = parts.slice(0, i + 1).join("/");
+                            makeCrumb(part, folder, i === parts.length - 1, `${base}/${folder}`);
+                        });
+                    }
+                    requestAnimationFrame(() => { crumbBar.scrollLeft = crumbBar.scrollWidth; });
+                };
 
                 const renderSidebar = () => {
                     sidebar.innerHTML = "";
                     if (!node.galleryData || node.galleryData.error) return;
                     const folders = Object.keys(node.galleryData.tree).sort();
+                    const childrenMap = new Map();
+                    folders.forEach(f => {
+                        if (f === ".") return;
+                        const parent = getParentFolder(f);
+                        if (!childrenMap.has(parent)) childrenMap.set(parent, []);
+                        childrenMap.get(parent).push(f);
+                    });
+                    const current = getCurrentFolder();
+                    let selectedEl = null;
                     const buildTreeElement = (path, depth) => {
-                        const isSelected = (memoryWidget.value || ".") === path;
+                        const children = childrenMap.get(path) || [];
+                        const hasChildren = children.length > 0;
+                        const isSelected = current === path;
                         const isExpanded = node.expandedFolders.has(path);
-                        const hasChildren = folders.some(f => {
-                            const parts = f.split('/');
-                            const parentPath = parts.slice(0, -1).join('/') || ".";
-                            return parentPath === path && f !== path;
-                        });
                         const item = document.createElement("div");
-                        item.style = `padding:6px 8px; padding-left:${depth * 12 + 8}px; cursor:pointer; font-size:11px; display:flex; align-items:center; gap:5px; color:${isSelected?"#00ecff":"#ccc"}; background:${isSelected?"#2a2a2a":"transparent"}; border-radius:2px; margin:1px 4px; white-space:nowrap; overflow:hidden;`;
-                        const arrow = document.createElement("span"); arrow.style = `font-size:8px; width:10px; display:inline-block; color:${isSelected ? "#00ecff" : "#555"};`;
-                        if (hasChildren) arrow.innerText = isExpanded ? "▼" : "▶";
-                        const icon = document.createElement("span"); icon.innerText = isExpanded && hasChildren ? "📂" : "📁";
-                        const label = document.createElement("span"); label.innerText = path === "." ? "根目录" : path.split('/').pop();
+                        item.style = `padding:5px 6px; padding-left:${depth * 12 + 4}px; cursor:pointer; font-size:11px; display:flex; align-items:center; gap:3px; color:${isSelected?"#00ecff":"#ccc"}; background:${isSelected?"#2a2a2a":"transparent"}; border-radius:2px; margin:1px 4px; white-space:nowrap; overflow:hidden;`;
+                        item.title = path === "." ? (pathWidget.value || "").trim() : path;
+                        item.onmouseenter = () => { if (!isSelected) item.style.background = "#262626"; };
+                        item.onmouseleave = () => { if (!isSelected) item.style.background = "transparent"; };
+                        const arrow = document.createElement("span");
+                        arrow.innerText = hasChildren ? (isExpanded ? "▾" : "▸") : "";
+                        Object.assign(arrow.style, {
+                            width: "12px", flexShrink: "0", textAlign: "center", fontSize: "9px",
+                            color: isSelected ? "#00ecff" : "#666", cursor: hasChildren ? "pointer" : "default",
+                            padding: "2px 0"
+                        });
+                        if (hasChildren) {
+                            arrow.title = isExpanded ? "折叠" : "展开";
+                            arrow.onclick = (e) => {
+                                e.stopPropagation();
+                                if (node.expandedFolders.has(path)) node.expandedFolders.delete(path);
+                                else node.expandedFolders.add(path);
+                                renderSidebar();
+                            };
+                        }
+                        const icon = document.createElement("span");
+                        icon.innerText = isExpanded && hasChildren ? "📂" : "📁";
+                        icon.style = "font-size:11px; flex-shrink:0;";
+                        const label = document.createElement("span");
+                        label.innerText = path === "." ? "根目录" : path.split("/").pop();
+                        label.style = "overflow:hidden; text-overflow:ellipsis;";
                         item.appendChild(arrow); item.appendChild(icon); item.appendChild(label);
                         item.onclick = (e) => {
-                            e.stopPropagation(); memoryWidget.value = path;
-                            if (hasChildren) {
-                                if (node.expandedFolders.has(path)) { if (path !== ".") node.expandedFolders.delete(path); }
-                                else node.expandedFolders.add(path);
-                            }
-                            renderSidebar(); clearAndRefresh(); viewport.scrollTop = 0;
+                            if (e.target === arrow) return;
+                            e.stopPropagation();
+                            applyFolder(path);
                         };
+                        if (isSelected) selectedEl = item;
                         sidebar.appendChild(item);
-                        if (isExpanded && hasChildren) {
-                            folders.forEach(f => {
-                                const parts = f.split('/');
-                                const parentPath = parts.slice(0, -1).join('/') || ".";
-                                if (parentPath === path && f !== path) buildTreeElement(f, depth + 1);
-                            });
-                        }
+                        if (isExpanded && hasChildren) children.forEach(child => buildTreeElement(child, depth + 1));
                     };
                     buildTreeElement(".", 0);
+                    if (selectedEl) {
+                        requestAnimationFrame(() => {
+                            if (!selectedEl.isConnected) return;
+                            const top = selectedEl.offsetTop;
+                            const bottom = top + selectedEl.offsetHeight;
+                            if (top < sidebar.scrollTop || bottom > sidebar.scrollTop + sidebar.clientHeight) {
+                                sidebar.scrollTop = Math.max(0, top - sidebar.clientHeight / 2);
+                            }
+                        });
+                    }
+                };
+
+                // 切换文件夹。historyMode: push=记入历史（点击导航），none=只跳转（前进/后退），reset=重建历史
+                const applyFolder = (folder, historyMode = "push") => {
+                    const target = normalizeFolder(folder);
+                    if (target !== "." && !folderExists(target)) return false;
+                    memoryWidget.value = target;
+                    expandAncestors(target);
+                    if (historyMode === "push") {
+                        node.navHistory = node.navHistory.slice(0, node.navIndex + 1);
+                        if (node.navHistory[node.navHistory.length - 1] !== target) node.navHistory.push(target);
+                        node.navIndex = node.navHistory.length - 1;
+                    } else if (historyMode === "reset" || !node.navHistory.length) {
+                        node.navHistory = [target];
+                        node.navIndex = 0;
+                    }
+                    renderSidebar();
+                    renderBreadcrumb();
+                    clearAndRefresh();
+                    viewport.scrollTop = 0;
+                    syncNavButtons();
+                    return true;
+                };
+
+                backBtn.onclick = () => {
+                    if (node.navIndex <= 0) return;
+                    node.navIndex -= 1;
+                    applyFolder(node.navHistory[node.navIndex], "none");
+                };
+                forwardBtn.onclick = () => {
+                    if (node.navIndex >= node.navHistory.length - 1) return;
+                    node.navIndex += 1;
+                    applyFolder(node.navHistory[node.navIndex], "none");
+                };
+                upBtn.onclick = () => {
+                    const current = getCurrentFolder();
+                    if (current === ".") return;
+                    applyFolder(getParentFolder(current));
+                };
+                crumbBar.onwheel = (e) => {
+                    if (crumbBar.scrollWidth <= crumbBar.clientWidth) return;
+                    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+                        crumbBar.scrollLeft += e.deltaY;
+                        e.preventDefault();
+                    }
                 };
 
                 const getSortedImages = () => {
@@ -374,6 +646,24 @@ app.registerExtension({
                     if (node.sortMode === "name_desc") sorted.sort((a,b) => b.localeCompare(a));
                     if (node.sortMode === "date_desc") sorted.reverse();
                     return sorted;
+                };
+
+                // 该图是否有同名的非空 txt（后端 get_gallery 里顺手统计好，前端不用再多请求）
+                const hasPrompt = (fullPath) => {
+                    const folder = memoryWidget.value || ".";
+                    const name = fullPath.split("/").pop();
+                    const list = node.galleryData?.prompts?.[folder];
+                    return Array.isArray(list) && list.includes(name);
+                };
+                const markPromptFlag = (fullPath, has) => {
+                    const folder = memoryWidget.value || ".";
+                    const name = fullPath.split("/").pop();
+                    if (!node.galleryData.prompts) node.galleryData.prompts = {};
+                    const list = node.galleryData.prompts[folder] || (node.galleryData.prompts[folder] = []);
+                    const i = list.indexOf(name);
+                    if (has && i === -1) list.push(name);
+                    if (!has && i !== -1) list.splice(i, 1);
+                    updateVirtualScroll();
                 };
 
                 const updateVirtualScroll = () => {
@@ -405,17 +695,30 @@ app.registerExtension({
                             const box = document.createElement("div");
                             box.style = `position:absolute; pointer-events:auto; overflow:hidden; box-sizing:border-box;`;
                             if (isList) {
-                                box.style.lineHeight = "20px"; box.style.padding = "0 10px"; box.style.fontSize = "12px"; box.innerText = imgName;
+                                box.style.lineHeight = "20px"; box.style.padding = "0 10px"; box.style.fontSize = "12px";
+                                box.style.display = "flex"; box.style.alignItems = "center"; box.style.gap = "6px";
+                                const nameEl = document.createElement("span");
+                                nameEl.style = "flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;";
+                                const markEl = document.createElement("span");
+                                markEl.innerText = "💬"; markEl.title = "有提示词(txt)";
+                                markEl.style = "flex-shrink:0; font-size:10px; color:#81C784; opacity:0;";
+                                box.appendChild(nameEl); box.appendChild(markEl);
+                                box._nameEl = nameEl; box._markEl = markEl;
                             } else {
                                 box.style.background = "#222"; box.style.borderRadius = "4px";
                                 const img = document.createElement("img"); img.style = "width:100%; height:100%; object-fit:cover; display:block; opacity:0; transition:opacity 0.3s;";
                                 img.src = `/geniusewzq/view_image?path=${encodeURIComponent(fullPath)}&t=${node.refreshTimestamp}`; img.onload = () => img.style.opacity = "1";
                                 box.appendChild(img);
+                                const markEl = document.createElement("span");
+                                markEl.innerText = "💬"; markEl.title = "有提示词(txt)";
+                                markEl.style = "position:absolute; top:3px; left:3px; font-size:10px; line-height:14px; background:rgba(0,0,0,0.65); border-radius:3px; padding:0 3px; color:#81C784; opacity:0;";
+                                box.appendChild(markEl);
+                                box._markEl = markEl;
                             }
                             box.onclick = () => {
                                 const currentIdx = images.indexOf(imgName);
                                 if (imageWidget.value === fullPath) {
-                                    node.currentPreviewIndex = currentIdx; updateOverlayImage(currentIdx); overlay.style.display = "block";
+                                    openOverlayAt(currentIdx);
                                 } else {
                                     imageWidget.value = fullPath; 
                                     if(imageWidget.callback) imageWidget.callback(fullPath);
@@ -428,6 +731,10 @@ app.registerExtension({
                         const box = node.renderedItems.get(fullPath);
                         box.style.width = `${itemWidth}px`; box.style.height = `${isList ? 20 : itemWidth}px`;
                         box.style.transform = `translate(${x}px, ${y}px)`;
+                        const showMark = hasPrompt(fullPath);
+                        box.title = imgName + (showMark ? "（有提示词）" : "");
+                        if (box._nameEl) box._nameEl.innerText = imgName;
+                        if (box._markEl) box._markEl.style.opacity = showMark ? "1" : "0";
                         if (isList) {
                             box.style.color = isSelected ? "#00ecff" : "#ccc"; box.style.background = isSelected ? "#2a2a2a" : "transparent";
                         } else {
@@ -448,8 +755,21 @@ app.registerExtension({
                         node.refreshTimestamp = Date.now();
                         const res = await fetch(`/geniusewzq/get_gallery?path=${encodeURIComponent(currentPath)}&t=${Date.now()}`);
                         node.galleryData = await res.json();
+                        // 当前文件夹已不存在（被外部删除/重命名）时回退到根目录，避免空白页
+                        let current = getCurrentFolder();
+                        if (current !== "." && !folderExists(current)) {
+                            current = ".";
+                            memoryWidget.value = ".";
+                        }
+                        expandAncestors(current);
+                        if (!node.navHistory.length || node.navHistory[node.navIndex] !== current) {
+                            node.navHistory = [current];
+                            node.navIndex = 0;
+                        }
                         renderSidebar();
+                        renderBreadcrumb();
                         clearAndRefresh();
+                        syncNavButtons();
                         // 首次打开时 DOM 可能尚未完成布局（viewport.clientHeight=0/偏小），
                         // 等下一帧及稍后布局稳定后各重算一次，避免列表只渲染前几行
                         requestAnimationFrame(() => updateVirtualScroll());
@@ -464,7 +784,12 @@ app.registerExtension({
                 viewport.onscroll = updateVirtualScroll;
 
                 this.addDOMWidget("gallery_ui", "HTML", mainWrapper);
-                pathWidget.callback = refreshGallery;
+                // 换库根目录时清空导航历史，避免在旧库的文件夹之间来回跳
+                pathWidget.callback = () => {
+                    node.navHistory = [];
+                    node.navIndex = 0;
+                    refreshGallery();
+                };
                 node.onResize = () => { if (node.resizeTimer) clearTimeout(node.resizeTimer); node.resizeTimer = setTimeout(() => updateVirtualScroll(), 60); };
 
                 // 视口尺寸变化（含首次布局完成、侧栏拖拽、节点缩放）→ 自动重算可见行，

@@ -24,8 +24,10 @@ class VisualCharacterSelector:
             }
         }
 
-    RETURN_TYPES = ("IMAGE", "MASK", "STRING")
-    RETURN_NAMES = ("图像", "透明通道", "提示词")
+    # 输出顺序：图像 → 提示词 → 透明通道
+    # 注意：调整顺序会让旧工作流里已连好的“透明通道/提示词”两根线错位，需要重新连接。
+    RETURN_TYPES = ("IMAGE", "STRING", "MASK")
+    RETURN_NAMES = ("图像", "提示词", "透明通道")
     FUNCTION = "load_image"
     CATEGORY = "geniusewzq_tools"
 
@@ -44,7 +46,7 @@ class VisualCharacterSelector:
             no_alpha_mode = "opaque"
         # 默认空返回
         if not image_path or not os.path.exists(image_path):
-            return (torch.zeros([1, 64, 64, 3]), torch.zeros([1, 64, 64]), "")
+            return (torch.zeros([1, 64, 64, 3]), "", torch.zeros([1, 64, 64]))
 
         # 1. 加载图像并转换为 Tensor
         img_tensor = torch.zeros([1, 64, 64, 3])
@@ -93,7 +95,7 @@ class VisualCharacterSelector:
             except Exception as e:
                 print(f"读取提示词文件失败: {e}")
 
-        return (img_tensor, alpha_tensor, prompt_text)
+        return (img_tensor, prompt_text, alpha_tensor)
 
 # --- 路由部分：供前端画廊调用 ---
 
@@ -111,6 +113,7 @@ async def get_gallery(request):
             return web.json_response({"error": str(e), "tree": {}})
     
     tree = {}
+    prompts = {}
     try:
         for root, dirs, files in os.walk(path):
             # 目录排序，保证前端树顺序稳定
@@ -121,10 +124,21 @@ async def get_gallery(request):
             # 所有目录都进树（包括空文件夹，便于上传图片时找到它）；无图则为空列表
             safe_rel_path = rel_path.replace("\\", "/")
             tree[safe_rel_path] = sorted(images)
+            # 顺带标记哪些图片有非空同名 txt：前端列表直接显示 💬，不用逐张点开才知道
+            with_prompt = []
+            for f in images:
+                txt_path = os.path.splitext(os.path.join(root, f))[0] + ".txt"
+                try:
+                    if os.path.getsize(txt_path) > 0:
+                        with_prompt.append(f)
+                except OSError:
+                    pass
+            if with_prompt:
+                prompts[safe_rel_path] = sorted(with_prompt)
     except Exception as e:
-        return web.json_response({"error": str(e), "tree": {}})
-            
-    return web.json_response({"tree": tree, "error": None})
+        return web.json_response({"error": str(e), "tree": {}, "prompts": {}})
+
+    return web.json_response({"tree": tree, "prompts": prompts, "error": None})
 
 @PromptServer.instance.routes.get("/geniusewzq/view_image")
 async def view_image(request):

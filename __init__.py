@@ -1,4 +1,4 @@
-import os
+﻿import os
 import subprocess
 import sys
 from aiohttp import web
@@ -71,4 +71,4 @@ WEB_DIRECTORY = "./web"
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY']
 
 # 版本标记：ComfyUI 启动日志中看到此行即确认加载的是最后一版
-print("[geniusewzq_tools] v1.4.1 已加载：6 个节点（视觉资源库选择器/比例切换器/比例切换器 Pro/截取关键帧/动态提示词链/快速分组开关）")
+print("[geniusewzq_tools] v1.5.1 已加载：6 个节点（视觉资源库选择器/比例切换器/比例切换器 Pro/截取关键帧/动态提示词链/快速分组开关）")
