@@ -5,7 +5,7 @@
 // 因此用「独立浮层」补绘灰行原值（不受 Vue 重渲染影响）；旧画布渲染前端自动回退前景绘制。
 import { app } from "../../../scripts/app.js";
 
-console.log("[geniusewzq] v1.4.5 loaded: AspectRatioSwitcherPro");
+console.log("[geniusewzq] v1.4.6 loaded: AspectRatioSwitcherPro");
 
 // ---------- 浮层样式（一次注入） ----------
 (function injectStyle() {
@@ -167,7 +167,7 @@ const DIM_FORMATTERS = {
 
 // 控件说明（模拟页说明卡 ①②③ → 悬停提示）
 const TOOLTIPS = {
-    "Latent来源": "未连输入时锁定为「节点自建空白Latent」；连入 Latent 后自动开启透传，仍可手动切换",
+    "Latent来源": "未连输入时锁定为「节点自建空白Latent」；连入 Latent 后自动开启透传，仍可手动切回自建（手动选择会被记住，切换工作流不会改回去）",
     "尺寸模式": "关＝百万像素比例；开＝手动自定义（自定义宽高生效）",
     "宽高比": "目标画幅比例，共 8 种",
     "百万像素": "① 画面总像素量（0.1~16 MP），决定清晰度总量",
@@ -450,6 +450,8 @@ app.registerExtension({
         };
 
         // ---- 决策 9：Latent 输入连入→自动开启透传；断开→锁定回自建 ----
+        // 重要（用户反馈）：加载工作流时连线会被重放，此时绝不能覆盖用户保存的开关值，
+        // 否则「连了线 + 手动选自建」的节点一切换工作流就被改回「使用输入Latent」。
         const onConnectionsChange = nodeType.prototype.onConnectionsChange;
         nodeType.prototype.onConnectionsChange = function (side, slot, connect, linkInfo, ioSlot) {
             onConnectionsChange?.apply(this, arguments);
@@ -458,25 +460,45 @@ app.registerExtension({
             const byName = this._gswqW;
             if (!byName || !byName["Latent来源"]) return;
             const hasLink = connect === true || input.link != null;
-            byName["Latent来源"].value = !!hasLink;
-            byName["Latent来源"].disabled = !hasLink;
+            if (!hasLink) {
+                // 断开：已不可能透传，强制回到自建
+                byName["Latent来源"].value = false;
+                byName["Latent来源"].disabled = true;
+            } else if (this._gswqLoading) {
+                // 工作流还原中的连线重放：只解锁控件，保留保存的选择
+                byName["Latent来源"].disabled = false;
+            } else {
+                // 用户手动连线：默认切到透传（之后仍可手动关掉，且开关值会被工作流记住）
+                byName["Latent来源"].value = true;
+                byName["Latent来源"].disabled = false;
+            }
             this._gswqApplyLocks?.();
             this._gswqUpdate?.();
         };
 
-        // ---- 加载校正（决策 9）：连线状态 = 开关状态，双向强制一致 ----
+        // ---- 加载校正（决策 9）：只修正「不可能」的组合，其余保留工作流里的选择 ----
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function (info) {
+            this._gswqLoading = true;
             onConfigure?.apply(this, arguments);
             const byName = this._gswqW;
             if (!byName || !byName["Latent来源"]) return;
+            const src = byName["Latent来源"];
             const hasLink = this.inputs?.[0]?.link != null;
-            byName["Latent来源"].value = !!hasLink;
-            byName["Latent来源"].disabled = !hasLink;
+            if (!hasLink) {
+                // 没连线就只能自建
+                src.value = false;
+                src.disabled = true;
+            } else {
+                // 有连线：保留工作流里保存的值（undefined 说明是旧工作流，按原来的自动透传处理）
+                src.value = src.value === undefined ? true : src.value === true;
+                src.disabled = false;
+            }
             this._gswqApplyLocks?.();
             this._gswqUpdate?.();
             this._gswqRestoring = false; // 还原结束，之后的改动才计入「最后一次操作」
             this._gswqResetSnap?.();     // 以工作流里的值为基线，避免把旧值写回记忆
+            setTimeout(() => { this._gswqLoading = false; }, 0);
         };
 
         // ---- 节点删除时清理浮层 ----
@@ -488,5 +510,6 @@ app.registerExtension({
         };
     },
 });
+
 
 
