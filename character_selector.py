@@ -1,4 +1,7 @@
 import os
+import io
+import time
+import hashlib
 import torch
 import numpy as np
 from PIL import Image
@@ -119,12 +122,186 @@ async def get_gallery(request):
 
     return web.json_response({"tree": tree, "prompts": prompts, "mtimes": mtimes, "error": None})
 
+@PromptServer.instance.routes.get("/geniusewzq/list_folder")
+async def list_folder(request):
+    """只列一层：当前文件夹的图片 + 直接子文件夹（带各自图片数量）。
+    资源库很大时，全库 os.walk 会让根目录卡住，所以前端改成按需展开。"""
+    base = os.path.normpath((request.query.get("path", "") or "").strip())
+    folder = (request.query.get("folder", ".") or ".").strip() or "."
+    empty = {"folder": folder.replace("\\", "/"), "files": [], "mtimes": {},
+             "prompts": [], "childCounts": {}, "error": None}
+    if not base or not os.path.isdir(base):
+        empty["error"] = "路径不存在"
+        return web.json_response(empty)
+    target = os.path.normpath(os.path.join(base, folder))
+    try:
+        base_abs = os.path.abspath(base).lower()
+        if os.path.commonpath([base_abs, os.path.abspath(target).lower()]) != base_abs:
+            empty["error"] = "路径越界"
+            return web.json_response(empty)
+    except ValueError:
+        empty["error"] = "路径无效"
+        return web.json_response(empty)
+
+    exts = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
+    files, mtimes, prompts, child_counts = [], {}, [], {}
+    try:
+        with os.scandir(target) as it:
+            entries = list(it)
+        for e in entries:
+            if e.is_dir():
+                # 跳过隐藏目录（含删除回收站 .gswq_trash）
+                if e.name.startswith(".") or e.name == "__pycache__":
+                    continue
+                count = 0
+                try:
+                    with os.scandir(e.path) as sub:
+                        for s in sub:
+                            if s.is_file() and s.name.lower().endswith(exts):
+                                count += 1
+                except OSError:
+                    pass
+                child_counts[os.path.relpath(e.path, base).replace("\\", "/")] = count
+            elif e.is_file() and e.name.lower().endswith(exts):
+                files.append(e.name)
+                try:
+                    mtimes[e.name] = e.stat().st_mtime
+                except OSError:
+                    pass
+    except Exception as e:
+        empty["error"] = str(e)
+        return web.json_response(empty)
+
+    files.sort()
+    for f in files:
+        txt_path = os.path.splitext(os.path.join(target, f))[0] + ".txt"
+        try:
+            with open(txt_path, "r", encoding="utf-8", errors="ignore") as fh:
+                if fh.read().strip():
+                    prompts.append(f)
+        except OSError:
+            pass
+    return web.json_response({
+        "folder": folder.replace("\\", "/"),
+        "files": files,
+        "mtimes": mtimes,
+        "prompts": sorted(prompts),
+        "childCounts": child_counts,
+        "error": None,
+    })
+
+@PromptServer.instance.routes.get("/geniusewzq/check_path")
+async def check_path(request):
+    """给路径栏用：判断输入的绝对路径是否存在、是不是文件夹（不创建任何东西）。"""
+    p = (request.query.get("path", "") or "").strip()
+    if not p:
+        return web.json_response({"exists": False, "is_dir": False})
+    p = os.path.normpath(p)
+    return web.json_response({
+        "exists": os.path.exists(p),
+        "is_dir": os.path.isdir(p),
+        "path": p,
+    })
+
+
+def _fnv1a_hex(text: str) -> str:
+    """和前端 visual_browser.js 里的 fnv1a 完全一致（UTF-8 字节、32 位）。"""
+    h = 0x811C9DC5
+    for b in text.encode("utf-8", "ignore"):
+        h ^= b
+        h = (h * 0x01000193) & 0xFFFFFFFF
+    return f"{h:08x}"
+
+
+@PromptServer.instance.routes.post("/geniusewzq/preview_cache")
+async def preview_cache(request):
+    """
+    把选中图片生成一张 input/gswq_previews 下的缩略图。
+    目的：MiniMax H3 Director 之类的下游节点用 /view?type=input 找缩略图，
+    只能读到 input 目录下的文件；图库通常在 output 目录，所以要镜像一份。
+
+    文件名只用路径的 FNV-1a 哈希（不含 mtime/size），这样前端在选中的瞬间
+    就能算出文件名并立刻写给下游，不用等这个请求返回（否则下游会慢一张图）。
+    """
+    try:
+        data = await request.json()
+        src = data.get("path")
+        if not src or not os.path.isfile(src):
+            return web.json_response({"success": False, "error": "文件不存在"})
+
+        abs_src = os.path.abspath(src)
+        name = f"p_{_fnv1a_hex(os.path.normcase(abs_src).replace(os.sep, '/'))}.png"
+
+        in_dir = os.path.join(folder_paths.get_input_directory(), "gswq_previews")
+        os.makedirs(in_dir, exist_ok=True)
+        dst = os.path.join(in_dir, name)
+
+        # 每次都重新生成：同名路径图片被改过时也能立刻刷新
+        with Image.open(src) as im:
+            im = im.convert("RGB")
+            im.thumbnail((640, 640), Image.LANCZOS)
+            im.save(dst, "PNG")
+
+        # 顺手清掉 7 天前的旧缩略图
+        now = time.time()
+        for f in os.listdir(in_dir):
+            fp = os.path.join(in_dir, f)
+            try:
+                if now - os.path.getmtime(fp) > 7 * 24 * 3600:
+                    os.remove(fp)
+            except OSError:
+                pass
+
+        return web.json_response({
+            "success": True,
+            "subfolder": "gswq_previews",
+            "filename": name,
+            "rel": f"gswq_previews/{name}",
+        })
+    except Exception as e:
+        return web.json_response({"success": False, "error": str(e)})
+
+
+# 缩略图内存缓存：(绝对路径, mtime, 大小, 边长) -> JPEG 字节
+_thumb_cache = {}
+_THUMB_CACHE_MAX = 600
+
+
 @PromptServer.instance.routes.get("/geniusewzq/view_image")
 async def view_image(request):
     img_path = request.query.get("path", "")
-    if os.path.exists(img_path):
-        return web.FileResponse(img_path)
-    return web.Response(status=404)
+    if not os.path.exists(img_path):
+        return web.Response(status=404)
+
+    thumb = request.query.get("thumb")
+    if thumb:
+        try:
+            size = max(16, min(1024, int(thumb)))
+        except (TypeError, ValueError):
+            size = 64
+        try:
+            st = os.stat(img_path)
+            key = (os.path.abspath(img_path), st.st_mtime, st.st_size, size)
+            data = _thumb_cache.get(key)
+            if data is None:
+                with Image.open(img_path) as im:
+                    im = im.convert("RGB")
+                    im.thumbnail((size, size), Image.LANCZOS)
+                    buf = io.BytesIO()
+                    im.save(buf, "JPEG", quality=82)
+                    data = buf.getvalue()
+                if len(_thumb_cache) > _THUMB_CACHE_MAX:
+                    _thumb_cache.clear()
+                _thumb_cache[key] = data
+            return web.Response(
+                body=data,
+                content_type="image/jpeg",
+                headers={"Cache-Control": "max-age=86400"},
+            )
+        except Exception:
+            pass  # 缩略图生成失败就退回原图，不影响显示
+
+    return web.FileResponse(img_path)
 
 # --- 新增路由：上传图片 ---
 @PromptServer.instance.routes.post("/geniusewzq/upload_image")

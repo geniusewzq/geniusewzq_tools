@@ -1,6 +1,6 @@
 ﻿import { app } from "../../../scripts/app.js";
 
-console.log("[geniusewzq] v1.7.2 loaded: VisualBrowser");
+console.log("[geniusewzq] v1.8.5 loaded: VisualBrowser");
 
 app.registerExtension({
     name: "geniusewzq.VisualBrowser",
@@ -21,13 +21,72 @@ app.registerExtension({
                 // image_path 只是内部传值（执行时读图 + 随工作流保存），界面上不再显示这一行
                 if (imageWidget) imageWidget.type = "hidden";
 
+                // base_directory 也收进内部：路径直接由顶部路径栏显示/输入（和 Windows 资源管理器一样）
+                if (pathWidget) pathWidget.type = "hidden";
+
+                // MiniMax H3 Director 等下游节点会读上游节点里名为 "image" 的控件来显示缩略图，
+                // 而且它只认 input 目录下的相对路径。选中图片时会在 input/gswq_previews 生成镜像，
+                // 这里用一个隐藏控件把相对路径带出去（放在最后，避免打乱旧工作流的 widgets_values 顺序）。
+                let previewWidget = null;
+
+                // 32 位 FNV-1a（UTF-8），必须和后端 _fnv1a_hex 完全一致
+                const fnv1aHex = (text) => {
+                    const bytes = new TextEncoder().encode(text);
+                    let h = 0x811c9dc5 >>> 0;
+                    for (let i = 0; i < bytes.length; i++) {
+                        h ^= bytes[i];
+                        h = Math.imul(h, 0x01000193) >>> 0;
+                    }
+                    return h.toString(16).padStart(8, "0");
+                };
+                const previewRelFor = (fullPath) => {
+                    const norm = String(fullPath).replace(/\\/g, "/").replace(/\/{2,}/g, "/").toLowerCase();
+                    return `gswq_previews/p_${fnv1aHex(norm)}.png`;
+                };
+                // 生成 input/gswq_previews 镜像缩略图，供下游（如 MiniMaxH3Director）按 type=input 读取
+                let previewSeq = 0;
+                const ensurePreview = async (fullPath, retried) => {
+                    if (!fullPath) return;
+                    const seq = ++previewSeq;
+                    const rel = previewRelFor(fullPath);
+                    const fileName = rel.split("/").pop();
+                    const url = `/view?filename=${encodeURIComponent(fileName)}&subfolder=gswq_previews&type=input`;
+                    // 先同步写给下游：文件名由路径哈希决定，不用等后端，避免“慢一张图”
+                    if (previewWidget) previewWidget.value = rel;
+                    try {
+                        const res = await fetch("/geniusewzq/preview_cache", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ path: fullPath })
+                        });
+                        const j = await res.json();
+                        if (seq !== previewSeq) return;
+                        if (!j || !j.success) {
+                            // 失败重试一次（多半是同时选了太多张、或图片正被占用）
+                            if (!retried) { setTimeout(() => ensurePreview(fullPath, true), 600); }
+                            else { console.warn("[geniusewzq] 生成预览缩略图失败:", j && j.error); }
+                            return;
+                        }
+                        // 只预热浏览器缓存，不挂到 node.imgs —— 否则节点画布上会多出一块原生大图预览
+                        new Image().src = `${url}&_=${Date.now()}`;
+                    } catch (err) {
+                        if (!retried) { setTimeout(() => ensurePreview(fullPath, true), 600); }
+                        else { console.warn("[geniusewzq] 生成预览缩略图失败", err); }
+                    }
+                };
+
                 node.viewMode = node.viewMode || "list";
                 node.sortMode = node.sortMode || "date_desc";
+                // 不挂原生大图预览（缩略图只镜像给下游节点用）
+                node.imgs = null; node.imageIndex = 0;
                 node.sidebarWidth = node.sidebarWidth || 150;
                 node.expandedFolders = node.expandedFolders || new Set(["."]);
                 node.focusFolder = node.focusFolder || null;
                 node.renderedItems = new Map();
                 node.galleryData = { tree: {}, prompts: {}, mtimes: {} };
+                // 按需加载：已请求过的文件夹 + 每个文件夹的直接子文件夹数量（避免全库扫描）
+                node.listingLoaded = new Set();
+                node.childCounts = {};
                 node.currentPreviewIndex = -1;
                 node.refreshTimestamp = Date.now();
 
@@ -143,14 +202,21 @@ app.registerExtension({
 
                 // 翻页即选用：预览到哪张，节点就用哪张
                 const previewState = { index: -1 };
-                const buildFullPath = (imgName) => `${pathWidget.value.trim()}/${memoryWidget.value || "."}/${imgName}`.replace(/\/+/g, '/');
+                const buildFullPath = (imgName) => {
+                    const base = String(pathWidget.value || "").trim().replace(/\\/g, "/").replace(/\/+$/, "");
+                    const rel = String(memoryWidget.value || ".").replace(/\\/g, "/").replace(/^\.\/?$/, "");
+                    return rel ? `${base}/${rel}/${imgName}` : `${base}/${imgName}`;
+                };
                 const getPreviewName = () => getSortedImages()[previewState.index] || null;
                 const getPreviewPath = () => { const n = getPreviewName(); return n ? buildFullPath(n) : null; };
                 const commitSelection = (fullPath) => {
                     if (!fullPath) return;
-                    if (imageWidget.value === fullPath) return;
-                    imageWidget.value = fullPath;
-                    if (imageWidget.callback) imageWidget.callback(fullPath);
+                    // 统一成正斜杠，避免 image_path 出现 C:\a/b 这种混写导致下游解析失败
+                    const normalized = String(fullPath).replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+                    ensurePreview(normalized);
+                    if (imageWidget.value === normalized) return;
+                    imageWidget.value = normalized;
+                    if (imageWidget.callback) imageWidget.callback(normalized);
                     node.setDirtyCanvas(true, true);
                 };
 
@@ -399,14 +465,19 @@ app.registerExtension({
                         promptTextarea.placeholder = "加载失败，可手动输入...";
                     }
 
-                    const tImg = new Image();
-                    tImg.src = `/geniusewzq/view_image?path=${encodeURIComponent(fullPath)}&t=${Date.now()}`;
-                    tImg.onload = () => {
+                    // 直接给展示图设 src，避免再额外下载一遍；失败时明确提示，而不是一直“载入中”
+                    imgDisplay.onload = () => {
                         if (previewState.index !== clamped) return;
-                        infoTag.innerText = `${tImg.naturalWidth} × ${tImg.naturalHeight}`;
-                        imgDisplay.src = tImg.src;
+                        infoTag.innerText = `${imgDisplay.naturalWidth} × ${imgDisplay.naturalHeight}`;
                         imgDisplay.style.opacity = "1";
                     };
+                    imgDisplay.onerror = () => {
+                        if (previewState.index !== clamped) return;
+                        infoTag.innerText = "图片加载失败（路径可能已失效）";
+                        imgDisplay.style.opacity = "1";
+                        console.warn("[geniusewzq] 无法加载图片:", fullPath);
+                    };
+                    imgDisplay.src = `/geniusewzq/view_image?path=${encodeURIComponent(fullPath)}&t=${Date.now()}`;
                 };
 
                 const openOverlayAt = (index) => {
@@ -449,17 +520,28 @@ app.registerExtension({
                 [{id:"date_desc", n:"最新在前"}, {id:"date_asc", n:"最早在前"}, {id:"name_asc", n:"名称 A-Z"}, {id:"name_desc", n:"名称 Z-A"}].forEach(s => {
                     const opt = document.createElement("option"); opt.value = s.id; opt.innerText = s.n; if(node.sortMode === s.id) opt.selected = true; sortSelect.appendChild(opt);
                 });
-                const refreshBtn = document.createElement("button"); refreshBtn.innerText = "🔄 刷新"; refreshBtn.style = "cursor:pointer; font-size:10px; padding:3px 10px; background:#333; color:#00ecff; border:1px solid #555; border-radius:3px; flex-shrink:0;";
+                const refreshBtn = document.createElement("button"); refreshBtn.innerText = "↻"; refreshBtn.title = "刷新（重新读取当前目录）";
+                refreshBtn.style = "width:24px; height:22px; display:flex; align-items:center; justify-content:center; background:#2a2a2a; color:#00ecff; border:1px solid #444; border-radius:3px; font-size:14px; cursor:pointer; padding:0; flex-shrink:0;";
+                const locateBtn = document.createElement("button"); locateBtn.innerText = "⌖"; locateBtn.title = "回到当前选中的图片";
+                locateBtn.style = "width:24px; height:22px; display:flex; align-items:center; justify-content:center; background:#2a2a2a; color:#81C784; border:1px solid #444; border-radius:3px; font-size:15px; cursor:pointer; padding:0; flex-shrink:0;";
 
                 const upBtn = document.createElement("button"); upBtn.innerText = "↑"; upBtn.title = "上一级文件夹";
                 upBtn.style = "width:24px; height:22px; display:flex; align-items:center; justify-content:center; background:#2a2a2a; color:#ccc; border:1px solid #444; border-radius:3px; font-size:12px; cursor:pointer; padding:0; flex-shrink:0;";
                 const crumbBar = document.createElement("div");
+                crumbBar.className = "vb-crumb";
                 Object.assign(crumbBar.style, {
                     display: "flex", alignItems: "center", gap: "2px", flex: "1", minWidth: "0",
-                    overflowX: "auto", overflowY: "hidden", whiteSpace: "nowrap"
+                    overflowX: "auto", overflowY: "hidden", whiteSpace: "nowrap", scrollbarWidth: "none"
                 });
-                topBar.appendChild(upBtn); topBar.appendChild(crumbBar);
-                topBar.appendChild(modeGroup); topBar.appendChild(sortSelect); topBar.appendChild(refreshBtn);
+                if (!document.getElementById("vb-crumb-style")) {
+                    const st = document.createElement("style");
+                    st.id = "vb-crumb-style";
+                    st.textContent = ".vb-crumb::-webkit-scrollbar{height:0;width:0;display:none}";
+                    document.head.appendChild(st);
+                }
+                topBar.appendChild(locateBtn); topBar.appendChild(upBtn); topBar.appendChild(crumbBar);
+                topBar.appendChild(refreshBtn);
+                topBar.appendChild(modeGroup); topBar.appendChild(sortSelect);
 
                 const bodyContainer = document.createElement("div");
                 bodyContainer.style = "display:flex; flex:1; overflow:hidden; position:relative;";
@@ -494,6 +576,49 @@ app.registerExtension({
                     if (!base) return "根目录";
                     return base.split(/[\\/]/).filter(Boolean).pop() || "根目录";
                 };
+
+                // --- 绝对路径辅助（和 Windows 资源管理器一致：C:\a\b） ---
+                const normSlashes = (s) => String(s || "").replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+                // 保留盘符根 "E:/"（去掉斜杠会变成 "E:"，Windows 上含义会变成“E: 当前目录”）
+                const stripTrailingSlash = (s) => (/^[a-zA-Z]:\/$/.test(s) ? s : s.replace(/\/+$/, ""));
+                const isAbsolutePath = (s) => /^[a-zA-Z]:(\/|$)/.test(s) || s.startsWith("//");
+                const getBasePath = () => stripTrailingSlash(normSlashes((pathWidget.value || "").trim()));
+                const getAbsoluteFolder = () => {
+                    const base = getBasePath();
+                    const rel = getCurrentFolder();
+                    if (!base) return rel === "." ? "" : rel;
+                    return rel === "." ? base : stripTrailingSlash(`${base}/${rel}`);
+                };
+                const splitAbsolute = (abs) => {
+                    const parts = normSlashes(abs).split("/").filter(Boolean);
+                    const segs = [];
+                    let acc = "";
+                    parts.forEach((p, i) => {
+                        if (i === 0 && /^[a-zA-Z]:$/.test(p)) acc = `${p}/`;
+                        else acc = acc ? (acc.endsWith("/") ? `${acc}${p}` : `${acc}/${p}`) : p;
+                        segs.push({ label: p, path: stripTrailingSlash(acc) });
+                    });
+                    return segs;
+                };
+                const resolveDots = (p) => {
+                    const out = [];
+                    normSlashes(p).split("/").forEach(part => {
+                        if (!part || part === ".") return;
+                        if (part === "..") { if (out.length) out.pop(); return; }
+                        out.push(part);
+                    });
+                    return out.join("/") || ".";
+                };
+
+                // 切换库根（路径栏里点盘符之上的段、或输入另一个绝对路径时用）
+                const setBasePath = (abs) => {
+                    if (!abs) return;
+                    pathWidget.value = stripTrailingSlash(normSlashes(abs));
+                    memoryWidget.value = ".";
+                    node.expandedFolders = new Set(["."]);
+                    if (pathWidget.callback) return pathWidget.callback(pathWidget.value);
+                    return refreshGallery();
+                };
                 const folderExists = (folder) => {
                     const tree = node.galleryData && node.galleryData.tree;
                     return !!tree && Object.prototype.hasOwnProperty.call(tree, folder);
@@ -504,57 +629,126 @@ app.registerExtension({
                     const parts = folder.split("/");
                     for (let i = 1; i <= parts.length; i++) node.expandedFolders.add(parts.slice(0, i).join("/"));
                 };
+
+                // 只拉一层：当前文件夹的图片 + 直接子文件夹
+                const listFolder = async (folder, force) => {
+                    const key = normalizeFolder(folder);
+                    if (!force && node.listingLoaded.has(key)) return true;
+                    const base = (pathWidget.value || "").trim();
+                    if (!base) return false;
+                    try {
+                        const res = await fetch(`/geniusewzq/list_folder?path=${encodeURIComponent(base)}&folder=${encodeURIComponent(key)}&t=${Date.now()}`);
+                        const j = await res.json();
+                        if (!j || j.error) { if (j && j.error) showToast(j.error); return false; }
+                        node.galleryData.tree[key] = j.files || [];
+                        node.galleryData.mtimes[key] = j.mtimes || {};
+                        if ((j.prompts || []).length) node.galleryData.prompts[key] = j.prompts;
+                        else delete node.galleryData.prompts[key];
+                        node.childCounts[key] = j.childCounts || {};
+                        // 让侧栏能显示还没展开过的子文件夹
+                        Object.keys(node.childCounts[key]).forEach(k => {
+                            if (!(k in node.galleryData.tree)) node.galleryData.tree[k] = [];
+                        });
+                        node.listingLoaded.add(key);
+                        return true;
+                    } catch (e) {
+                        console.error("[geniusewzq] 读取文件夹失败", e);
+                        return false;
+                    }
+                };
+                // 保证从库根到目标目录每一级都加载过（点路径栏/深链接时用）
+                const ensureFolderChain = async (folder, force) => {
+                    const key = normalizeFolder(folder);
+                    if (!(await listFolder(".", force))) return false;
+                    if (key === ".") return true;
+                    const parts = key.split("/");
+                    let cur = ".";
+                    for (const p of parts) {
+                        cur = cur === "." ? p : `${cur}/${p}`;
+                        if (!(await listFolder(cur, force))) return false;
+                    }
+                    return true;
+                };
                 const syncToolbar = () => {
-                    const enabled = getCurrentFolder() !== ".";
-                    upBtn.disabled = !enabled;
-                    upBtn.style.opacity = enabled ? "1" : "0.35";
-                    upBtn.style.cursor = enabled ? "pointer" : "default";
+                    const base = getBasePath();
+                    const baseDepth = base ? stripTrailingSlash(base).split("/").filter(Boolean).length : 0;
+                    const canUp = getCurrentFolder() !== "." || (baseDepth > 1 && !/^[a-zA-Z]:[\\/]?$/.test(base));
+                    upBtn.disabled = !canUp;
+                    upBtn.style.opacity = canUp ? "1" : "0.35";
+                    upBtn.style.cursor = canUp ? "pointer" : "default";
                 };
                 const renderBreadcrumb = () => {
+                    const base = getBasePath();
+                    const abs = getAbsoluteFolder();
                     const current = getCurrentFolder();
-                    const base = (pathWidget.value || "").trim();
                     crumbBar.innerHTML = "";
-                    const makeCrumb = (label, folder, isLast, fullPath) => {
+
+                    const makeCrumb = (label, onClick, isLast, fullPath) => {
                         const el = document.createElement("span");
                         el.innerText = label;
-                        el.title = fullPath;
+                        el.title = isLast ? "点击可输入完整路径（回车跳转）" : fullPath;
                         Object.assign(el.style, {
                             padding: "2px 6px", borderRadius: "3px", fontSize: "11px",
-                            color: isLast ? "#eeeeee" : "#8ab4c8",
+                            color: isLast ? "#ffffff" : "#8ab4c8",
                             background: isLast ? "#2c2c2c" : "transparent",
-                            cursor: isLast ? "default" : "pointer",
+                            cursor: isLast ? "text" : "pointer",
                             maxWidth: "180px", overflow: "hidden", textOverflow: "ellipsis", flexShrink: "0"
                         });
-                        if (!isLast) {
+                        if (isLast) {
+                            // 点当前文件夹名字 = 进入编辑路径（像资源管理器的地址栏）
+                            el.onmouseenter = () => { el.style.background = "#3a3a3a"; };
+                            el.onmouseleave = () => { el.style.background = "#2c2c2c"; };
+                            el.onclick = (e) => { e.stopPropagation(); startPathEdit(); };
+                        } else if (onClick) {
                             el.onmouseenter = () => { el.style.background = "#333333"; el.style.color = "#00ecff"; };
                             el.onmouseleave = () => { el.style.background = "transparent"; el.style.color = "#8ab4c8"; };
-                            el.onclick = (e) => { e.stopPropagation(); applyFolder(folder); };
+                            el.onclick = (e) => { e.stopPropagation(); onClick(); };
                         }
                         crumbBar.appendChild(el);
                     };
-                    makeCrumb(getRootLabel(), ".", current === ".", base || "根目录");
-                    if (current !== ".") {
-                        const parts = current.split("/");
-                        parts.forEach((part, i) => {
-                            const sep = document.createElement("span");
-                            sep.innerText = "›";
-                            sep.style = "color:#555; font-size:10px; flex-shrink:0;";
-                            crumbBar.appendChild(sep);
-                            const folder = parts.slice(0, i + 1).join("/");
-                            makeCrumb(part, folder, i === parts.length - 1, `${base}/${folder}`);
+
+                    const segs = splitAbsolute(abs);
+                    if (!segs.length) {
+                        makeCrumb("根目录", null, true, base);
+                    } else {
+                        // 路径太长时折叠中间段：盘符 … 最近两级，保证当前文件夹始终可见
+                        const shown = segs.length > 4
+                            ? [segs[0], { ellipsis: true, path: abs }, ...segs.slice(-2)]
+                            : segs;
+                        const baseLower = base.toLowerCase();
+                        shown.forEach((seg, i) => {
+                            if (i > 0) {
+                                const sep = document.createElement("span");
+                                sep.innerText = "›";
+                                sep.style = "color:#555; font-size:10px; flex-shrink:0;";
+                                crumbBar.appendChild(sep);
+                            }
+                            const isLast = i === shown.length - 1;
+                            if (seg.ellipsis) {
+                                makeCrumb("…", () => startPathEdit(), false, abs);
+                                return;
+                            }
+                            const insideBase = !!base && (seg.path + "/").toLowerCase().startsWith(baseLower + "/");
+                            if (insideBase) {
+                                const rel = seg.path.slice(base.length).replace(/^\/+/, "") || ".";
+                                makeCrumb(seg.label, () => applyFolder(rel), isLast, seg.path);
+                            } else {
+                                makeCrumb(seg.label, () => setBasePath(seg.path), isLast, seg.path);
+                            }
                         });
                     }
-                    // 点空白处直接输入路径（绝对路径/相对根目录/.. 都行）
+
+                    // 点空白处直接输入路径（绝对路径 / 相对当前目录 / .. 都行）
                     const spacer = document.createElement("span");
                     spacer.style = "flex:1; min-width:8px; align-self:stretch;";
                     crumbBar.appendChild(spacer);
                     const penEl = document.createElement("span");
                     penEl.innerText = "✎";
                     Object.assign(penEl.style, { flexShrink: "0", fontSize: "10px", color: "#666", padding: "0 4px", cursor: "text" });
-                    penEl.title = "点击输入路径";
+                    penEl.title = "点击输入完整路径";
                     penEl.onclick = (e) => { e.stopPropagation(); startPathEdit(); };
                     crumbBar.appendChild(penEl);
-                    crumbBar.title = "点击空白处可输入路径（回车跳转，Esc 取消）";
+                    crumbBar.title = "点击空白处可输入完整路径（回车跳转，Esc 取消）";
                     crumbBar.style.cursor = "text";
                     crumbBar.onmouseenter = () => { crumbBar.style.background = "#262626"; };
                     crumbBar.onmouseleave = () => { crumbBar.style.background = "transparent"; };
@@ -562,26 +756,37 @@ app.registerExtension({
                         if (e.target !== crumbBar && e.target !== spacer) return;
                         startPathEdit();
                     };
-                    requestAnimationFrame(() => { crumbBar.scrollLeft = crumbBar.scrollWidth; });
+                    requestAnimationFrame(() => { crumbBar.scrollLeft = 0; });
                 };
 
-                const resolveFolderInput = (raw) => {
-                    let v = (raw || "").trim();
-                    if (!v) return ".";
-                    v = v.replace(/\\/g, "/");
-                    const base = (pathWidget.value || "").trim().replace(/\\/g, "/").replace(/\/+$/, "");
-                    if (v === "." || v === "./") return ".";
-                    if (v === ".." || v.startsWith("../")) {
-                        let cur = getCurrentFolder();
-                        v.split("/").forEach(part => {
-                            if (part === "..") cur = getParentFolder(cur);
-                            else if (part && part !== ".") cur = cur === "." ? part : `${cur}/${part}`;
-                        });
-                        return normalizeFolder(cur);
+                const resolveTypedPath = async (raw) => {
+                    const typed = (raw || "").trim();
+                    if (!typed) return { ok: true, rel: "." };
+                    let v = normSlashes(typed);
+                    if (isAbsolutePath(v)) {
+                        v = stripTrailingSlash(v);
+                        let chk = { exists: false, is_dir: false };
+                        try { chk = await (await fetch(`/geniusewzq/check_path?path=${encodeURIComponent(v)}`)).json(); } catch (e) {}
+                        if (!chk.exists || !chk.is_dir) return { ok: false, error: `没有这个文件夹：${v}` };
+                        const base = getBasePath();
+                        const lowV = stripTrailingSlash(normSlashes(chk.path || v)).toLowerCase();
+                        const lowB = base.toLowerCase();
+                        if (base && (lowV === lowB || lowV.startsWith(lowB + "/"))) {
+                            const rel = stripTrailingSlash(normSlashes(chk.path || v)).slice(base.length).replace(/^\/+/, "");
+                            return { ok: true, rel: rel || "." };
+                        }
+                        return { ok: true, abs: stripTrailingSlash(normSlashes(chk.path || v)) };
                     }
-                    if (base && v.toLowerCase().startsWith(base.toLowerCase())) v = v.slice(base.length);
-                    v = v.replace(/^\/+/, "").replace(/\/+$/, "");
-                    return normalizeFolder(v);
+                    // 相对路径：先按当前目录解析，找不到再按库根目录解析
+                    const cur = getCurrentFolder();
+                    const candidates = [];
+                    if (cur !== ".") candidates.push(`${cur}/${v}`);
+                    candidates.push(v);
+                    for (const cand of candidates) {
+                        const rel = normalizeFolder(resolveDots(cand));
+                        if (folderExists(rel)) return { ok: true, rel };
+                    }
+                    return { ok: false, error: `没有这个文件夹：${typed}` };
                 };
 
                 let toastTimer = null;
@@ -642,29 +847,31 @@ app.registerExtension({
 
                 const startPathEdit = () => {
                     if (crumbBar.querySelector("input")) return;
-                    const current = getCurrentFolder();
+                    const abs = getAbsoluteFolder();
                     const extra = Array.from(crumbBar.children).filter(el => !el.querySelector("input"));
                     extra.forEach(el => { el.style.display = "none"; });
                     const input = document.createElement("input");
                     input.type = "text";
-                    input.value = current === "." ? "" : current;
-                    input.placeholder = "输入路径：相对根目录（A/B）、绝对路径、或 .. 回上级";
+                    input.value = abs;
+                    input.placeholder = "输入完整路径（如 C:\\图库\\角色A），回车跳转";
                     Object.assign(input.style, {
                         flex: "1", minWidth: "0", background: "#1a1a1a", color: "#00ecff",
                         border: "1px solid #00ecff", borderRadius: "3px", fontSize: "11px",
                         padding: "2px 6px", outline: "none", boxSizing: "border-box", height: "22px"
                     });
-                    const finish = (commit) => {
-                        const next = commit ? resolveFolderInput(input.value) : null;
+                    const finish = async (commit) => {
+                        const typed = input.value;
                         input.remove();
                         Array.from(crumbBar.children).forEach(el => { el.style.display = ""; });
                         if (!commit) { renderBreadcrumb(); return; }
-                        if (!folderExists(next)) {
+                        const res = await resolveTypedPath(typed);
+                        if (!res.ok) {
                             renderBreadcrumb();
-                            showToast(`没有这个文件夹：${next}`);
+                            showToast(res.error || "路径无效");
                             return;
                         }
-                        applyFolder(next);
+                        if (res.abs) { setBasePath(res.abs); return; }
+                        applyFolder(res.rel);
                     };
                     input.onkeydown = (e) => {
                         e.stopPropagation();
@@ -744,13 +951,18 @@ app.registerExtension({
                     }
                 };
 
-                // 切换文件夹
-                const applyFolder = (folder) => {
+                // 切换文件夹（按需加载目标目录及其祖先，只请求一层）
+                const applyFolder = async (folder) => {
                     const target = normalizeFolder(folder);
-                    if (target !== "." && !folderExists(target)) return false;
+                    const prev = getCurrentFolder();
                     node.focusFolder = null;
                     memoryWidget.value = target;
                     expandAncestors(target);
+                    const ok = await ensureFolderChain(target);
+                    if (!ok) {
+                        memoryWidget.value = prev;
+                        return false;
+                    }
                     renderSidebar();
                     renderBreadcrumb();
                     clearAndRefresh();
@@ -759,10 +971,18 @@ app.registerExtension({
                     return true;
                 };
 
-                upBtn.onclick = () => {
+                upBtn.onclick = async () => {
                     const current = getCurrentFolder();
-                    if (current === ".") return;
-                    applyFolder(getParentFolder(current));
+                    if (current !== ".") { applyFolder(getParentFolder(current)); return; }
+                    // 已经在库根：往上就是 base 的父目录（真正的上一级）
+                    const base = getBasePath();
+                    if (!base || /^[a-zA-Z]:\/$/.test(base)) { showToast("已经是顶层目录了"); return; }
+                    let parent = base.replace(/\/[^\/]+$/, "");
+                    if (/^[a-zA-Z]:$/.test(parent)) parent += "/";
+                    let chk = { exists: false, is_dir: false };
+                    try { chk = await (await fetch(`/geniusewzq/check_path?path=${encodeURIComponent(parent)}`)).json(); } catch (e) {}
+                    if (chk.exists && chk.is_dir) { await setBasePath(parent); syncToolbar(); }
+                    else showToast("已经是顶层目录了");
                 };
                 crumbBar.onwheel = (e) => {
                     if (crumbBar.scrollWidth <= crumbBar.clientWidth) return;
@@ -773,7 +993,8 @@ app.registerExtension({
                 };
 
                 const getSortedImages = () => {
-                    const folder = memoryWidget.value || ".";
+                    // memoryWidget 里可能是 "A\B" 这种反斜杠写法（旧工作流），先归一化
+                    const folder = normalizeFolder(memoryWidget.value || ".");
                     let list = node.galleryData?.tree?.[folder] || [];
                     const sorted = [...list];
                     const mt = (name) => node.galleryData?.mtimes?.[folder]?.[name] || 0;
@@ -821,10 +1042,11 @@ app.registerExtension({
                 };
 
                 const updateVirtualScroll = () => {
+                    const curFolder = getCurrentFolder();
                     const images = getSortedImages();
                     const subfolders = getSubfolders();
                     const entries = [
-                        ...subfolders.map(p => ({ kind: "folder", path: p, name: p.split("/").pop(), count: (node.galleryData.tree[p] || []).length })),
+                        ...subfolders.map(p => ({ kind: "folder", path: p, name: p.split("/").pop(), count: (node.childCounts[curFolder] || {})[p] ?? (node.galleryData.tree[p] || []).length })),
                         ...images.map(n => ({ kind: "image", name: n }))
                     ];
                     const isList = node.viewMode === "list";
@@ -832,7 +1054,7 @@ app.registerExtension({
                     const gap = isList ? 2 : 10; const padding = 10;
                     const viewWidth = viewport.clientWidth || 450;
                     const itemWidth = isList ? (viewWidth - 25) : (viewWidth - (padding * 2) - (gap * (cols - 1))) / cols;
-                    const rowHeight = (isList ? 20 : itemWidth) + gap;
+                    const rowHeight = (isList ? 26 : itemWidth) + gap;
                     ghostContent.style.height = (Math.ceil(entries.length / cols) * rowHeight + padding * 2) + "px";
                     const scrollTop = viewport.scrollTop;
                     const startRow = Math.max(0, Math.floor((scrollTop - padding) / rowHeight) - 1);
@@ -841,35 +1063,32 @@ app.registerExtension({
                     const endIndex = Math.min(entries.length, endRow * cols);
                     const currentVisibleKeys = new Set();
                     const currentPath = pathWidget.value.trim();
-                    const folder = memoryWidget.value || ".";
+                    const folder = normalizeFolder(memoryWidget.value || ".");
 
                     for (let i = startIndex; i < endIndex; i++) {
                         const entry = entries[i];
                         if (!entry) continue;
                         const isFolder = entry.kind === "folder";
-                        const fullPath = isFolder ? null : `${currentPath}/${folder}/${entry.name}`.replace(/\/+/g, '/');
+                        const fullPath = isFolder ? null : buildFullPath(entry.name);
                         const key = isFolder ? `dir:${entry.path}` : fullPath;
                         currentVisibleKeys.add(key);
-                        const isSelected = isFolder ? node.focusFolder === entry.path : imageWidget.value === fullPath;
+                        const isSelected = isFolder ? node.focusFolder === entry.path : normSlashes(imageWidget.value) === fullPath;
                         const x = padding + (i % cols) * (itemWidth + gap);
                         const y = padding + Math.floor(i / cols) * rowHeight;
                         if (!node.renderedItems.has(key)) {
                             const box = document.createElement("div");
+                            box._key = key;
                             box.style = `position:absolute; pointer-events:auto; overflow:hidden; box-sizing:border-box;`;
                             if (isFolder) {
                                 box.style.cursor = "pointer";
                                 if (isList) {
-                                    box.style.lineHeight = "20px"; box.style.padding = "0 10px"; box.style.fontSize = "12px";
+                                    box.style.lineHeight = "22px"; box.style.padding = "0 10px"; box.style.fontSize = "12px";
                                     box.style.display = "flex"; box.style.alignItems = "center"; box.style.gap = "6px";
                                     const iconEl = document.createElement("span"); iconEl.innerText = "📁"; iconEl.style = "flex-shrink:0; font-size:11px;";
                                     const nameEl = document.createElement("span");
-                                    nameEl.style = "flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#e0d090;";
-                                    const countEl = document.createElement("span");
-                                    countEl.style = "flex-shrink:0; font-size:10px; color:#777;";
-                                    const chevEl = document.createElement("span");
-                                    chevEl.innerText = "›"; chevEl.style = "flex-shrink:0; color:#666; font-size:12px;";
-                                    box.appendChild(iconEl); box.appendChild(nameEl); box.appendChild(countEl); box.appendChild(chevEl);
-                                    box._nameEl = nameEl; box._countEl = countEl;
+                                    nameEl.style = "flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#ffffff;";
+                                    box.appendChild(iconEl); box.appendChild(nameEl);
+                                    box._nameEl = nameEl;
                                 } else {
                                     box.style.background = "#1b1b1b"; box.style.borderRadius = "4px";
                                     const glyph = document.createElement("div");
@@ -878,19 +1097,17 @@ app.registerExtension({
                                         position: "absolute", left: "0", top: "0", width: "100%", height: "100%",
                                         display: "flex", alignItems: "center", justifyContent: "center", fontSize: "32px", opacity: "0.75"
                                     });
-                                    const nameEl = document.createElement("span");
+                                    box.appendChild(glyph);
+                                    // 大图模式下文件夹仍显示名称
+                                    const nameEl = document.createElement("div");
                                     Object.assign(nameEl.style, {
-                                        position: "absolute", left: "0", right: "0", bottom: "0", padding: "2px 5px",
-                                        fontSize: "10px", color: "#e0d090", background: "rgba(0,0,0,0.35)",
-                                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"
+                                        position: "absolute", left: "0", right: "0", bottom: "0",
+                                        padding: "2px 4px", textAlign: "center", fontSize: "10px", lineHeight: "14px",
+                                        color: "#ffffff", background: "rgba(0,0,0,0.5)",
+                                        whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"
                                     });
-                                    const countEl = document.createElement("span");
-                                    Object.assign(countEl.style, {
-                                        position: "absolute", top: "3px", right: "4px", fontSize: "9px",
-                                        color: "#aaa", background: "rgba(0,0,0,0.5)", borderRadius: "3px", padding: "0 3px"
-                                    });
-                                    box.appendChild(glyph); box.appendChild(nameEl); box.appendChild(countEl);
-                                    box._nameEl = nameEl; box._countEl = countEl;
+                                    box.appendChild(nameEl);
+                                    box._nameEl = nameEl;
                                 }
                                 box.title = `${entry.path}（双击进入）`;
                                 box.onclick = (e) => {
@@ -902,7 +1119,7 @@ app.registerExtension({
                                 box.tabIndex = 0;
                                 box.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); applyFolder(entry.path); } };
                             } else if (isList) {
-                                box.style.lineHeight = "20px"; box.style.padding = "0 10px"; box.style.fontSize = "12px";
+                                box.style.lineHeight = "22px"; box.style.padding = "0 10px"; box.style.fontSize = "12px";
                                 box.style.display = "flex"; box.style.alignItems = "center"; box.style.gap = "6px";
                                 const nameEl = document.createElement("span");
                                 nameEl.style = "flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;";
@@ -914,24 +1131,32 @@ app.registerExtension({
                             } else {
                                 box.style.background = "#222"; box.style.borderRadius = "4px";
                                 const img = document.createElement("img"); img.style = "width:100%; height:100%; object-fit:cover; display:block; opacity:0; transition:opacity 0.3s;";
-                                img.src = `/geniusewzq/view_image?path=${encodeURIComponent(fullPath)}&t=${node.refreshTimestamp}`; img.onload = () => img.style.opacity = "1";
+                                img.loading = "lazy"; img.decoding = "async";
+                                img.src = `/geniusewzq/view_image?path=${encodeURIComponent(fullPath)}&thumb=320&t=${node.refreshTimestamp}`; img.onload = () => img.style.opacity = "1";
                                 box.appendChild(img);
                                 const markEl = document.createElement("span");
                                 markEl.innerText = "词"; markEl.title = "有提示词(txt)";
                                 markEl.style = "position:absolute; top:3px; left:3px; font-size:9px; line-height:14px; background:rgba(0,0,0,0.65); border-radius:3px; padding:0 3px; color:#81C784; opacity:0;";
                                 box.appendChild(markEl);
                                 box._markEl = markEl;
+
                             }
                             if (!isFolder) {
-                                // 单击即放大，同时自动选用（锁定状态下只浏览）
+                                // 单击 = 选用这张图；双击 = 打开大图预览
+                                const imgIdx = images.indexOf(entry.name);
                                 box.onclick = () => {
-                                    openOverlayAt(images.indexOf(entry.name));
+                                    commitSelection(fullPath);
+                                    updateVirtualScroll();
+                                };
+                                box.ondblclick = () => {
+                                    commitSelection(fullPath);
+                                    openOverlayAt(imgIdx);
                                 };
                             }
                             itemContainer.appendChild(box); node.renderedItems.set(key, box);
                         }
                         const box = node.renderedItems.get(key);
-                        box.style.width = `${itemWidth}px`; box.style.height = `${isList ? 20 : itemWidth}px`;
+                        box.style.width = `${itemWidth}px`; box.style.height = `${isList ? 26 : itemWidth}px`;
                         box.style.transform = `translate(${x}px, ${y}px)`;
                         if (box._nameEl) box._nameEl.innerText = entry.name;
                         if (box._countEl) box._countEl.innerText = isFolder && entry.count ? String(entry.count) : "";
@@ -939,7 +1164,7 @@ app.registerExtension({
                             if (isList) {
                                 box.style.background = isSelected ? "#2a2a2a" : "transparent";
                             } else {
-                                box.style.border = isSelected ? "2px solid #e0d090" : "1px solid #333";
+                                box.style.border = isSelected ? "2px solid #cccccc" : "1px solid #333";
                             }
                             continue;
                         }
@@ -958,19 +1183,21 @@ app.registerExtension({
                 const clearAndRefresh = () => { node.renderedItems.forEach(el => el.remove()); node.renderedItems.clear(); updateVirtualScroll(); };
 
                 const refreshGallery = async () => {
-                    const currentPath = pathWidget.value?.trim();
-                    if(!currentPath) return;
+                    const base = pathWidget.value?.trim();
+                    if (!base) return;
                     showLoading(`<div style="margin-bottom:10px; font-size:24px;">⌛</div><div>同步中...</div>`);
                     try {
                         // 更新时间戳，强制刷新图片缓存
                         node.refreshTimestamp = Date.now();
-                        const res = await fetch(`/geniusewzq/get_gallery?path=${encodeURIComponent(currentPath)}&t=${Date.now()}`);
-                        node.galleryData = await res.json();
-                        // 当前文件夹已不存在（被外部删除/重命名）时回退到根目录，避免空白页
+                        // 刷新 = 丢掉按需加载的缓存，只重新拉当前这条链（不扫全库）
+                        node.listingLoaded = new Set();
+                        node.childCounts = {};
+                        node.galleryData = { tree: {}, prompts: {}, mtimes: {} };
                         let current = getCurrentFolder();
-                        if (current !== "." && !folderExists(current)) {
+                        if (!(await ensureFolderChain(current, true))) {
                             current = ".";
                             memoryWidget.value = ".";
+                            await ensureFolderChain(".", true);
                         }
                         expandAncestors(current);
                         renderSidebar();
@@ -984,17 +1211,76 @@ app.registerExtension({
                     } catch (e) { console.error(e); } finally { hideLoading(); }
                 };
 
+                // 回到当前选中的图片：切到它所在目录并滚动高亮
+                const scrollToSelected = async () => {
+                    const full = normSlashes((imageWidget.value || "").trim());
+                    if (!full) { showToast("还没有选图：先在浏览区点一张"); return; }
+                    const base = getBasePath();
+                    const lowFull = full.toLowerCase();
+                    let folderRel = null;
+                    if (base && lowFull.startsWith(base.toLowerCase() + "/")) {
+                        const rel = full.slice(base.length + 1);
+                        folderRel = rel.split("/").slice(0, -1).join("/") || ".";
+                    }
+                    if (folderRel === null) {
+                        // 选中的图不在当前库根下：把库根切到它所在目录的「父目录」，
+                        // 这样左侧目录树仍然能看到这一层和它的兄弟，不会变成空的。
+                        const dir = full.split("/").slice(0, -1).join("/");
+                        const parts = dir.split("/").filter(Boolean);
+                        if (!dir) { showToast("图片路径无效"); return; }
+                        if (parts.length > 1) {
+                            await setBasePath(parts.slice(0, -1).join("/"));
+                            folderRel = parts[parts.length - 1];
+                        } else {
+                            await setBasePath(dir);
+                            folderRel = ".";
+                        }
+                    }
+                    if (normalizeFolder(folderRel) !== getCurrentFolder()) {
+                        const ok = await applyFolder(folderRel);
+                        if (!ok) { showToast("打不开这张图所在的目录"); return; }
+                    }
+                    const name = full.split("/").pop();
+                    const images = getSortedImages();
+                    const idx = images.indexOf(name);
+                    if (idx < 0) { showToast("这张图不在当前目录（可能已被移动或删除）"); return; }
+                    const isList = node.viewMode === "list";
+                    const cols = isList ? 1 : 3;
+                    const gap = isList ? 2 : 10; const padding = 10;
+                    const viewWidth = viewport.clientWidth || 450;
+                    const itemWidth = isList ? (viewWidth - 25) : (viewWidth - (padding * 2) - (gap * (cols - 1))) / cols;
+                    const rowHeight = (isList ? 26 : itemWidth) + gap;
+                    const index = getSubfolders().length + idx;
+                    const top = padding + Math.floor(index / cols) * rowHeight;
+                    viewport.scrollTop = Math.max(0, top - Math.max(0, viewport.clientHeight / 2 - rowHeight / 2));
+                    updateVirtualScroll();
+                    requestAnimationFrame(() => {
+                        const target = [...itemContainer.children].find(el => el._key && String(el._key).toLowerCase() === full.toLowerCase());
+                        if (!target) return;
+                        target.style.boxShadow = "inset 0 0 0 2px #00ecff";
+                        setTimeout(() => { target.style.boxShadow = ""; }, 1400);
+                    });
+                };
+
                 btnLarge.onclick = () => { node.viewMode = "large"; btnLarge.style = btnStyle(true); btnList.style = btnStyle(false); clearAndRefresh(); };
                 btnList.onclick = () => { node.viewMode = "list"; btnLarge.style = btnStyle(false); btnList.style = btnStyle(true); clearAndRefresh(); };
                 sortSelect.onchange = (e) => { node.sortMode = e.target.value; clearAndRefresh(); };
                 refreshBtn.onclick = () => refreshGallery();
+                locateBtn.onclick = () => scrollToSelected();
                 viewport.onscroll = updateVirtualScroll;
 
                 this.addDOMWidget("gallery_ui", "HTML", mainWrapper);
+
+                // 放在 gallery 之后：旧工作流前 4 个 widgets_values 仍然一一对应
+                previewWidget = node.widgets.find(w => w.name === "image");
+                if (!previewWidget) {
+                    previewWidget = node.addWidget("text", "image", "", () => {}, { serialize: true });
+                    previewWidget.type = "hidden";
+                }
                 // 换库根目录时回到根目录
                 pathWidget.callback = () => {
                     memoryWidget.value = ".";
-                    refreshGallery();
+                    return refreshGallery();
                 };
                 node.onResize = () => { if (node.resizeTimer) clearTimeout(node.resizeTimer); node.resizeTimer = setTimeout(() => updateVirtualScroll(), 60); };
 
@@ -1137,7 +1423,7 @@ app.registerExtension({
                         const padding = 10;
                         const viewWidth = viewport.clientWidth || 450;
                         const itemWidth = isList ? (viewWidth - 25) : (viewWidth - (padding * 2) - (gap * (cols - 1))) / cols;
-                        const rowHeight = (isList ? 20 : itemWidth) + gap;
+                        const rowHeight = (isList ? 26 : itemWidth) + gap;
                         const rowIndex = Math.floor(index / cols);
                         viewport.scrollTop = rowIndex * rowHeight;
                     }
@@ -1146,11 +1432,36 @@ app.registerExtension({
                 setupDragAndDrop();
                 setupPaste();
 
-                setTimeout(refreshGallery, 500); this.setSize([650, 650]);
+                // 旧工作流里 memoryWidget 可能是 "A\B" / "./A" 这种写法，入口处先归一化
+                memoryWidget.value = normalizeFolder(memoryWidget.value || ".");
+                setTimeout(refreshGallery, 500);
+                // 打开已保存的工作流时，把上次选中的图片同步成预览缩略图
+                if (imageWidget && imageWidget.value) {
+                    setTimeout(() => ensurePreview(imageWidget.value), 900);
+                }
+                this.setSize([650, 650]);
             };
         }
     }
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
