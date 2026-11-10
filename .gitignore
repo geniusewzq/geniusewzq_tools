@@ -1,15 +1,6 @@
-# Python
+# 提示词工坊的本地数据与第三方库，不进仓库
+data/
+promptforge_vendor/
+web/promptforge_browser.html
 __pycache__/
-*.pyc
-
-# IDE
-.vscode/
-.idea/
-
-# OS
-Thumbs.db
-.DS_Store
-
-# ComfyUI
-output/
-models/
+*.bak-*
