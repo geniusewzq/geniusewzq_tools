@@ -57,14 +57,9 @@ DEFAULT_CONFIG = {
     "deepseek": {"base": "https://api.deepseek.com/v1", "model": "deepseek-chat", "key": "", "timeout": 120},
 }
 
-STRENGTH_HINT = {
-    "轻": "只做轻微整理：补全明显缺失的镜头与光线，不要新增主体，长度控制在原文 1.5 倍以内。",
-    "标准": "按规范补全缺失项，重写为一条可直接出图的提示词，长度可为原文 2-3 倍。",
-    "重": "按规范完整重构：补全镜头、光线、材质、结构，必要时重排顺序，允许 3 倍以上长度。",
-}
+# 「强度」已移除：它只改措辞强度，用户看不出差别；允许加多少内容改由「侧重」与「深度扩写」控制。
 
 
-NEG_MODES = ["自动(按规范)", "分开输出", "合并进正面", "丢弃"]
 LANG_MODES = ["自动", "中文", "英文"]
 SERVICE_MODES = ["本地 llama.cpp", "DeepSeek", "仅规则"]
 
@@ -157,10 +152,40 @@ def list_skills():
     return out or ["qwen-image-2.1"]
 
 
+def _read_meta(name):
+    path = os.path.join(SKILL_DIR, f"{name}.md")
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            meta, _body = _parse_front(f.read())
+        return meta
+    except OSError:
+        return {}
+
+
+def resolve_skill(value):
+    """下拉只剩『目标模型』：把模型名 / 标题 / 文件名统一换成 skills 里的文件名。"""
+    names = list_skills()
+    v = str(value or "").strip()
+    if not v:
+        return names[0]
+    if v in names:
+        return v
+    key = re.sub(r"\s+", "", v).lower()
+    for name in names:
+        meta = _read_meta(name)
+        for cand in (meta.get("target"), meta.get("title"), name):
+            if cand and re.sub(r"\s+", "", str(cand)).lower() == key:
+                return name
+    return names[0]
+
+
 _SKILL_CACHE = {}
 
 
 def load_skill(name):
+    name = resolve_skill(name)
     if name in _SKILL_CACHE:
         return _SKILL_CACHE[name]
     path = os.path.join(SKILL_DIR, f"{name}.md")
@@ -282,9 +307,10 @@ def llm_chat(messages, service="本地 llama.cpp", temperature=0.7, max_tokens=1
         "model": model,
         "messages": messages,
         "temperature": temperature,
-        "max_tokens": max_tokens,
         "stream": False,
     }
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
     t0 = time.time()
     try:
         data = _post_json(f"{base}/chat/completions", payload, key, timeout)
@@ -518,17 +544,6 @@ def _lang_rule(lang, text):
     return "输出语种跟随输入：输入是中文就输出中文，输入是英文就输出英文。"
 
 
-KEEP_CHAR_HINT = (
-    "本次任务要锁定人物身份：在正文第一句，用你自己的话写出一句「以参考图为准保持人物一致」的说明，"
-    "必须覆盖发型、发色、瞳色、脸型、肤色、体型，以及发饰、首饰、耳饰、项链、妆容、配饰这些会变的细节。"
-    "这句说明每次都要重新组织措辞，禁止照抄任何模板句。写完这一句，再用逗号接正文。"
-)
-KEEP_CHAR_HINT_EN = (
-    "Lock the character identity: the first sentence must state, in your own wording, that the "
-    "character (hairstyle, hair color, eye color, face shape, skin, body type, plus hair ornaments, "
-    "jewelry, earrings, necklace, makeup and accessories) must stay identical to the reference image. "
-    "Never reuse a canned sentence. Then a comma and the body."
-)
 APPEAR_RE = re.compile(
     r"(^|_)(hair|eyes|eyebrows|eyelashes|face|skin|body|breasts?|lips|nose|mouth|teeth|beard|"
     r"freckles|abs|muscles|thighs|legs|feet|hands|ears|tail|wings|horns)(_|$)"
@@ -536,10 +551,61 @@ APPEAR_RE = re.compile(
     r"multicolor|multicolored|two-tone)_(hair|eyes)$",
     re.I)
 
-EXPAND_RULES = (
-    "在保留原文主体、场景与关键元素的前提下做深度扩写：补上能画出来的具体细节"
-    "（材质与纹理、光比与色温、景深与焦段、构图、氛围、情绪），让画面更丰富、更有想象力。"
-    "不要换人、不要换场景，不要写成说明文、分镜表或 JSON。"
+CONTRACT_HEAD = (
+    "改写合同（最重要，违反就算写错）：\n"
+    "1. 每个对象都要在用户原文里有出处：不许新增原文没有的主体、人数、身份、道具、动物、服装款式、"
+    "背景元素。\n"
+    "2. 不许删掉原文提到的任何要素，也不许替换主体或场景。\n"
+    "3. 允许的改动：把原文已有的元素写清楚、调整语序让它连贯、按目标模型规范组织格式；"
+    "原文写得具体的地方照抄原词，不要换同义词。\n"
+)
+
+
+def change_rules(keys=None, expand=False):
+    """改写合同：按「侧重」「深度扩写」动态放开对应维度，避免与禁用条款互相打架。"""
+    keys = [k for k in EXTRA_ORDER if k in set(keys or [])]
+    picked = "、".join(keys)
+    if expand:
+        rule4 = (
+            "4. 这次是深度扩写：允许在原文已有的对象上把状态写深，也允许补全景别、机位、光线、材质、"
+            "色彩、构图、氛围、质感这些非主体维度；但人物、道具、动物、场景仍然一律不许新增，"
+            "主体与人数必须不变。"
+        )
+        if keys:
+            rule4 += (
+                "用户勾了侧重（" + picked + "），这几个维度要比其他维度写得更深更具体、"
+                "占全篇篇幅最多，并尽量放在句子前段。"
+            )
+        else:
+            rule4 += "没有勾侧重时就各维度平均写好，不偏科。"
+        rule5 = (
+            "5. 篇幅不设限制：每个已有元素都写成完整的一句，允许补的维度各写到能画出画面为止，"
+            "写完该说的就停，不要为了显长堆形容词或加对象，也不要因为怕长就省掉已提到的要素。"
+        )
+    elif keys:
+        rule4 = (
+            "4. 用户勾了侧重，意思就是「这几个方面多写」：勾选的维度（" + picked + "）要写得最具体、"
+            "篇幅占比最大、尽量放在句子前段；没勾的维度只保留原文已经写到的内容，不额外补充。"
+            "人物、道具、动物、场景仍然一律不许新增。"
+        )
+        rule5 = (
+            "5. 篇幅不设限制：勾得越多就写越细，多出来的描写必须落在那几个侧重维度上；"
+            "没有可写的就停，不要为凑字数补空话。"
+        )
+    else:
+        rule4 = "4. 没有勾侧重：只整理原文，不补任何原文没有的环境、光线、镜头、材质。"
+        rule5 = "5. 篇幅不设限制：宁可比原文短，也不许编造原文没有的东西。"
+    tail = ("改写步骤：先在心里列出原文的每个要素，再逐条落到输出里；写完自查——有没有一个名词在原文里"
+            "找不到出处？有就删掉。")
+    return CONTRACT_HEAD + rule4 + "\n" + rule5 + "\n" + tail
+
+FORMAT_RULES = (
+    "格式规则（只输出一段最终提示词，绝对不要「tag 行 + 段落」这种两段式）：\n"
+    "- 原文是 tag、目标模型也吃 tag（如 Illustrious/Pony）：输出一行逗号分隔的 tag。\n"
+    "- 原文是 tag、目标模型要自然语句（如 Qwen-Image）：改写成规范允许的自然语句，"
+    "但能出现的对象仍然只能是原文里那些 tag。\n"
+    "- 原文是自然语句：用同样的语言写成自然语句，不要另外加一行 tag。\n"
+    "- 语言跟随原文：中文原文输出中文，英文原文输出英文。"
 )
 
 EXTRA_RULES = {
@@ -594,23 +660,51 @@ EXTRA_RULES = {
         "服装：写清款式、版型与合身程度、面料与纹理、层次与配饰（领口/袖口/腰带/纽扣/缝线），"
         "以及服装随动作产生的褶皱与垂坠。"
     ),
+    "材质": (
+        "材质：把每种表面的物理属性写出来——粗糙或光滑、干或湿、新或旧、透明或哑光，"
+        "以及它在这种光线下怎么反光、怎么吃阴影（皮肤/布/木/石/金属/玻璃/水分别对待）。"
+    ),
+    "表情": (
+        "表情：写清眉眼与嘴部的具体状态（眉梢、眼睑、瞳孔高光、嘴角弧度、下颌松紧）、"
+        "视线方向与焦点，情绪靠这些信号表达，不要只写「微笑」「悲伤」这种标签。"
+    ),
+    "天气": (
+        "天气：写清是晴/阴/雨/雪/雾/风，空气里的湿气或尘埃，以及它如何改变光线与材质的观感"
+        "（雨天的反光、雾天的层次衰减、风带来的头发与衣料动态）。"
+    ),
+    "时间": (
+        "时间：写清一天中的时段与季节（清晨/正午/黄昏/夜晚、春夏秋冬），"
+        "连带出光线角度、色温、影子长度与生活痕迹（灯光开关、店里是否营业）。"
+    ),
+    "背景": (
+        "背景：写清主体背后的空间是什么、离主体多远、是实是虚、有什么可辨识的物件与线条，"
+        "背景只做衬托，不要抢主体，也不要引入新的人物或情节。"
+    ),
+    "视角": (
+        "视角：写清观看位置与高度（平视/俯视/仰视/过肩/背后/主观视角）、与主体的距离，"
+        "以及这个视角带来的透视变化与情绪倾向，全篇只用一个视角。"
+    ),
 }
 
 EXTRA_ORDER = (
     "人像摄影", "景别", "镜头逻辑", "人物关系", "光影", "构图", "色彩",
-    "质感", "动作", "镜头", "服装", "场景", "情绪",
+    "质感", "动作", "镜头", "服装", "场景", "情绪", "材质", "表情", "天气", "时间", "背景", "视角",
 )
-EXTRA_DEFAULT = ["人像摄影", "景别", "镜头逻辑", "人物关系"]
 
 
-def extra_rules(extras):
-    """把 ["质感", "动作"] 或 "质感+动作" 拆成规则文本，按固定顺序输出。"""
+def extra_keys(extras):
+    """把 ["质感", "动作"] 或 "质感+动作" 归一成已知的维度名列表（按固定顺序）。"""
     if not extras:
         return []
     if isinstance(extras, str):
         extras = [x for x in re.split(r"[+＋,，、\s]+", extras) if x]
     want = set(extras)
-    return [EXTRA_RULES[k] for k in EXTRA_ORDER if k in want]
+    return [k for k in EXTRA_ORDER if k in want]
+
+
+def extra_rules(extras):
+    """把选中的侧重维度转成规则文本。"""
+    return [EXTRA_RULES[k] for k in extra_keys(extras)]
 
 
 def strip_appearance(prompt):
@@ -623,45 +717,117 @@ def strip_appearance(prompt):
     return "，".join(keep)
 
 
-def build_opt_messages(text, skill_name, strength="标准", lang="自动", mode="优化",
-                       keep_char=False, extras=None):
-    """组装优化用的 messages（润色/改写同一条链路，流式与非流式共用）。"""
-    text = (text or "").strip()
-    if not text:
-        raise RuntimeError("文本框是空的")
+# 「要负面词/要标签清单」这类要求不是在描述画面，直接用规则给出，不交给模型自由发挥
+DIRECT_RE = re.compile(r"负面|反向|negative|提示词列表|标签列表|标签清单", re.I)
+
+NEGATIVE_COMMON_ZH = [
+    "低清晰度", "模糊", "噪点", "过曝", "欠曝", "低质量", "最差质量", "像素化",
+    "JPEG 压缩痕迹", "水印", "文字", "签名", "Logo", "边框", "马赛克",
+    "多余手指", "缺失手指", "畸形手", "手部结构错误", "额外肢体", "缺失肢体",
+    "多余手臂", "多余腿", "人体比例失调", "透视变形", "面部扭曲", "五官不对称",
+    "眼睛不对称", "斜视", "嘴部变形", "牙齿畸形", "双头", "重复身体",
+    "塑料感皮肤", "过度磨皮", "油光", "脏皮肤", "皮肤纹理缺失", "衣服穿模",
+    "衣物褶皱错误", "配饰错误", "头发糊成一团", "发丝断裂", "卡通化", "3D 渲染感",
+    "线条毛刺", "重影", "反光过强", "杂乱背景", "主体被裁切", "构图失衡",
+    "多余物体", "重复人物", "分辨率不足",
+]
+NEGATIVE_COMMON_EN = [
+    "low quality", "worst quality", "lowres", "blurry", "noise", "jpeg artifacts",
+    "overexposed", "underexposed", "watermark", "text", "signature", "logo", "border",
+    "extra fingers", "missing fingers", "bad hands", "malformed hands", "extra limbs",
+    "missing limbs", "extra arms", "extra legs", "bad anatomy", "bad proportions",
+    "deformed face", "asymmetric eyes", "cross-eyed", "bad mouth", "bad teeth",
+    "two heads", "duplicate body", "plastic skin", "over-smoothed skin", "greasy skin",
+    "clothing clipping", "bad cloth folds", "messy hair", "cartoon", "3d render",
+    "lineart artifacts", "ghosting", "harsh reflections", "cluttered background",
+    "cropped subject", "bad composition", "duplicate object", "low resolution",
+]
+
+
+def direct_reply(requirement, skill):
+    """要求本身是「给我一份文本」时（例如提供常用的负面提示词），按规范规则直接给结果。"""
+    req = (requirement or "").strip()
+    if not req or not DIRECT_RE.search(req):
+        return None
+    base = [x.strip() for x in re.split(r"[,，、\n]+", skill.get("negative", "") or "") if x.strip()]
+    en = bool(re.search(r"英文|english", req, re.I)) or (
+        bool(base) and all(ord(c) < 128 for c in "".join(base))
+    )
+    base = [t for t in base if all(ord(c) < 128 for c in t) == en]
+    picks, seen = [], set()
+    for t in base + (NEGATIVE_COMMON_EN if en else NEGATIVE_COMMON_ZH):
+        k = t.lower()
+        if t and k not in seen:
+            seen.add(k)
+            picks.append(t)
+    m = re.search(r"(\d+)\s*(个|条|项)", req)
+    if m:
+        picks = picks[:max(8, min(200, int(m.group(1))))]
+    return ", ".join(picks) if en else "，".join(picks)
+
+
+def build_opt_messages(requirement, skill_name, strength="标准", lang="自动", mode="优化",
+                       extras=None, draft=""):
+    """组装优化用的 messages：严格按用户要求写，写法规则来自目标模型规范，流式与非流式共用。"""
+    requirement = (requirement or "").strip()
+    draft = (draft or "").strip()
     skill = load_skill(skill_name)
     rules = skill.get("body") or "按摄影/绘画提示词的通用结构补全：主体、属性、场景、光线、镜头、材质、氛围。"
+    has_input = bool(requirement or draft)
     parts = [
-        f"你在为「{skill['title']}」深度扩写提示词。" if mode == "扩写"
-        else f"你在为「{skill['title']}」写提示词。",
-        EXPAND_RULES if mode == "扩写" else rules,
+        f"你在按「{skill['title']}」的提示词规则写提示词。",
+        rules,
     ]
-    parts += extra_rules(extras)
-    parts += [
-        STRENGTH_HINT.get(strength, STRENGTH_HINT["标准"]),
-        _lang_rule(lang, text),
-        "结构要求：先一句话定住主体与画面基调，再按「主体与人物关系 → 景别/机位/焦段 → 动作链（起因-过程-结果，"
-        "含重心与惯性） → 环境与空间层次 → 光线方向与色温 → 材质与细节 → 氛围与情绪」的顺序推进，"
-        "全篇围绕同一个瞬间，不要写成四段互不相干的清单。",
-        "写法要求：句子里要有具体名词和数量（「35mm 镜头」「三扇落地窗」「袖口翻了一折」）；"
-        "鼓励具体的、非套路的细节与想象力，但每个细节都必须能画出来；"
-        "禁止比喻句、禁止形容词堆砌（不要连着三个以上形容词）、禁止重复主体词、"
-        "禁止「美丽的」「令人惊叹的」「氛围感」这类空话；不要出现「画面中」「这张图」这种元叙述。",
-        "一致性要求：全篇不能自相矛盾——景别不能中途变化，机位与视角不能互相冲突，"
-        "主光方向只能有一个，人物动作与服装状态要能同时成立；"
-        "如果原文信息不足，就做出一个明确的选择并贯彻到底，不要同时给两种可能。",
-        "不要输出 JSON，不要加标题、编号、解释或 markdown。只给提示词正文本身。",
-        "不要把用户原文里没有的主体替换掉，可以补细节但不能换人换场景。",
-    ]
-    if keep_char:
+    if has_input:
         parts += [
-            KEEP_CHAR_HINT_EN if _lang_rule(lang, text).startswith("用英文") else KEEP_CHAR_HINT,
-            "正文里禁止出现任何人物外貌词（发型、发色、瞳色、脸型、肤色、体型、年龄、身材、"
-            "发饰、首饰、妆容、配饰、服装细节），一个都不要写；不要用「她有着…」「他长着…」这类句式，"
-            "也不要换近义词替代。第一句的说明句之后再也不要提这些。",
+            "上面规范里的 1-7 步只用来组织原文已经写到的内容，不是添加内容的许可：原文没写到的项留空，不要补。",
+            FORMAT_RULES,
         ]
+        keys = extra_keys(extras)
+        expand = mode == "扩写"
+        parts.append(change_rules(keys, expand))
+        if keys:
+            parts += [
+                "用户勾选的侧重（这几类必须写到、写具体，只写这几类）：",
+            ] + extra_rules(keys) + [
+                "输出前数一遍：勾选的每个侧重维度是不是都有具体描写？漏了就只补这几类，别补别的。",
+            ]
+    if requirement:
+        parts += [
+            "用户的要求（原文，按上面的合同逐字对待）：",
+            f"「{requirement}」",
+            _lang_rule(lang, requirement),
+            "用户要的是一份文本（负面提示词清单、标签清单、翻译、写法解释、对比）而不是画面时，"
+            "直接按用户要的内容和格式给出那份文本，不要把它当成主题去构思画面。",
+        ]
+        if draft:
+            parts += [
+                "用户手上已有一版提示词，只作参考；它与用户要求冲突时以要求为准，不要照抄它的毛病：",
+                f"「{draft}」",
+            ]
+    else:
+        parts += [
+            "用户没有填写要求：请自行构思一个主题，按上面的规则写出一条完整可用的提示词，"
+            "主题明确、细节具体，不要套模板。",
+        ]
+    if not has_input:
+        parts += [
+            "结构要求：先一句话定住主体与画面基调，再按「主体与人物关系 → 景别/机位/焦段 → 动作链（起因-过程-结果，"
+            "含重心与惯性） → 环境与空间层次 → 光线方向与色温 → 材质与细节 → 氛围与情绪」的顺序推进，"
+            "全篇围绕同一个瞬间，不要写成四段互不相干的清单。",
+            "写法要求：句子里要有具体名词和数量（「35mm 镜头」「三扇落地窗」「袖口翻了一折」）；"
+            "每个细节都必须能画出来；禁止比喻句、禁止形容词堆砌（不要连着三个以上形容词）、禁止重复主体词、"
+            "禁止「美丽的」「令人惊叹的」「氛围感」这类空话；不要出现「画面中」「这张图」这种元叙述。",
+            "一致性要求：全篇不能自相矛盾——景别不能中途变化，机位与视角不能互相冲突，"
+            "主光方向只能有一个，人物动作与服装状态要能同时成立；"
+            "如果信息不足，就做出一个明确的选择并贯彻到底，不要同时给两种可能。",
+        ]
+    parts += [
+        "不要输出 JSON，不要加标题、编号、解释或 markdown。只给提示词正文本身。",
+    ]
     sys_ = "\n".join(parts)
-    return [{"role": "system", "content": sys_}, {"role": "user", "content": text}], skill
+    user_text = requirement or "（没有具体要求，请随机构思一个主题）"
+    return [{"role": "system", "content": sys_}, {"role": "user", "content": user_text}], skill
 
 
 STREAM_SEP = "\n\u0001\n"
@@ -682,9 +848,10 @@ def chat_stream(messages, service="本地 llama.cpp", temperature=0.7, max_token
         "model": model,
         "messages": messages,
         "temperature": temperature,
-        "max_tokens": max_tokens,
         "stream": True,
     }
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(f"{base}/chat/completions", data=data, method="POST")
     req.add_header("Content-Type", "application/json")
@@ -715,29 +882,37 @@ def chat_stream(messages, service="本地 llama.cpp", temperature=0.7, max_token
                 yield piece
 
 
-def optimize_stream(text, skill_name, strength="标准", lang="自动",
+def optimize_stream(requirement, skill_name, strength="标准", lang="自动",
                     service="本地 llama.cpp", count=1, api=None, mode="优化",
-                    keep_char=False, extras=None):
-    """流式优化：多个候选之间用 STREAM_SEP 分隔，最后由调用方切分。"""
-    messages, _skill = build_opt_messages(text, skill_name, strength, lang, mode, keep_char, extras)
+                    extras=None, draft=""):
+    """流式优化：严格按 requirement 写，多个候选之间用 STREAM_SEP 分隔。"""
+    direct = direct_reply(requirement, load_skill(skill_name))
+    if direct:
+        yield direct
+        return
+    messages, _skill = build_opt_messages(requirement, skill_name, strength, lang, mode, extras, draft)
     n = max(1, min(int(count or 1), 5))
     try:
         for i in range(n):
             if i:
                 yield STREAM_SEP
-            for piece in chat_stream(messages, service, 0.7 if i == 0 else 0.9, 1400, api):
+            for piece in chat_stream(messages, service, 0.7 if i == 0 else 0.9, 0, api):
                 yield piece
     finally:
         pass
 
 
-def optimize_text(text, skill_name, strength="标准", lang="自动", service="本地 llama.cpp",
-                  count=1, api=None, mode="优化", keep_char=False, extras=None):
-    messages, skill = build_opt_messages(text, skill_name, strength, lang, mode, keep_char, extras)
+def optimize_text(requirement, skill_name, strength="标准", lang="自动", service="本地 llama.cpp",
+                  count=1, api=None, mode="优化", extras=None, draft=""):
+    skill_pre = load_skill(skill_name)
+    direct = direct_reply(requirement, skill_pre)
+    if direct:
+        return [direct], {"ms": 0, "tokens": 0, "direct": True}, skill_pre
+    messages, skill = build_opt_messages(requirement, skill_name, strength, lang, mode, extras, draft)
     outs, usage = [], {"ms": 0, "tokens": 0}
     for i in range(max(1, min(int(count or 1), 5))):
         out, u = llm_chat(
-            messages, service, temperature=0.7 if i == 0 else 0.9, max_tokens=1400, api=api,
+            messages, service, temperature=0.7 if i == 0 else 0.9, max_tokens=0, api=api,
         )
         usage = u
         cleaned = _strip_fence(out)
@@ -748,28 +923,18 @@ def optimize_text(text, skill_name, strength="标准", lang="自动", service="�
     return outs, usage, skill
 
 
-def compose(prompt, skill_name, neg_mode="自动(按规范)"):
-    """组装最终正/负面条件，纯规则，不联网。"""
+def compose(prompt, skill_name):
+    """只组装正面提示词（负面提示词功能已移除），纯规则，不联网。"""
     skill = load_skill(skill_name)
     pos = (prompt or "").strip()
     if not pos:
-        return "", ""
+        return ""
     prefix, suffix = skill.get("prefix", ""), skill.get("suffix", "")
     if prefix:
         pos = f"{prefix}, {pos}"
     if suffix:
         pos = f"{pos}, {suffix}"
-    neg = skill.get("negative", "").strip()
-    mode = neg_mode
-    if mode == "自动(按规范)" or not mode:
-        mode = skill.get("negative_mode") or "分开输出"
-        if mode.startswith("自动"):
-            mode = "分开输出"
-    if mode == "丢弃" or not neg:
-        return pos, ""
-    if mode == "合并进正面":
-        return f"{pos}\n负面：{neg}", ""
-    return pos, neg
+    return pos
 
 
 def skill_cards():
@@ -1136,28 +1301,26 @@ def _targets():
 
 
 class PromptForge:
-    """提示词工坊：翻译 / 优化 / tag 面板都在前端 JS 里，这里只负责产出两根 STRING。"""
+    """提示词工坊：翻译 / 优化 / tag 面板都在前端 JS 里，这里只负责产出一根提示词 STRING。"""
 
     CATEGORY = CATEGORY
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("正面条件", "负面条件")
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("提示词",)
     FUNCTION = "forge"
 
     @classmethod
     def INPUT_TYPES(cls):
-        skills = list_skills()
+        targets = _targets()
         return {
             "required": {
-                "目标模型": (_targets(), {"default": _targets()[0]}),
-                "规范": (skills, {"default": skills[0]}),
-                "强度": (["标准", "轻", "重"], {"default": "标准"}),
+                "目标模型": (targets, {"default": targets[0]}),
                 "语言": (LANG_MODES, {"default": "自动"}),
                 "服务": (SERVICE_MODES, {"default": "本地 llama.cpp"}),
-                "负面": (NEG_MODES, {"default": "自动(按规范)"}),
                 "提示词": ("STRING", {"multiline": True, "default": "", "dynamicPrompts": False}),
             },
         }
 
-    def forge(self, 提示词="", 规范=None, **kw):
-        pos, neg = compose(提示词, 规范 or list_skills()[0], kw.get("负面", "自动(按规范)"))
-        return (pos, neg)
+    def forge(self, 提示词="", 目标模型=None, **kw):
+        # 兼容旧工作流：老版本还有个『规范』输入，取不到就退回默认规范
+        skill = resolve_skill(目标模型 or kw.get("规范"))
+        return (compose(提示词, skill),)

@@ -1,4 +1,4 @@
-﻿import { app } from "../../../scripts/app.js";
+import { app } from "../../../scripts/app.js";
 
 console.log("[geniusewzq] v1.8.5 loaded: VisualBrowser");
 
@@ -83,7 +83,16 @@ app.registerExtension({
                 node.expandedFolders = node.expandedFolders || new Set(["."]);
                 node.focusFolder = node.focusFolder || null;
                 node.renderedItems = new Map();
-                node.galleryData = { tree: {}, prompts: {}, mtimes: {} };
+                node.galleryData = { tree: {}, prompts: {}, mtimes: {}, sizes: {}, bytes: {} };
+                // 列表模式右侧显示的字节数（1024 进制）
+                const fmtBytes = (n) => {
+                    const v = Number(n);
+                    if (!(v > 0)) return "";
+                    if (v < 1024) return v + " B";
+                    if (v < 1048576) return (v / 1024).toFixed(v < 10240 ? 1 : 0) + " KB";
+                    if (v < 1073741824) return (v / 1048576).toFixed(v < 10485760 ? 1 : 0) + " MB";
+                    return (v / 1073741824).toFixed(2) + " GB";
+                };
                 // 按需加载：已请求过的文件夹 + 每个文件夹的直接子文件夹数量（避免全库扫描）
                 node.listingLoaded = new Set();
                 node.childCounts = {};
@@ -119,6 +128,80 @@ app.registerExtension({
                     border: "1px solid #444", borderRadius: "4px", width: "100%",
                     height: "100%", overflow: "hidden", position: "relative"
                 });
+
+                // --- Nodes 2.0（Vue 节点）尺寸适配 ---
+                // 新版前端把 DOM widget 放进节点卡片内部，而卡片只设了 min-height。
+                // 只要这个 widget 还参与文档流，它的内容高度就会把卡片顶高，前端的
+                // ResizeObserver 又把卡片高度记成节点的 contentSize 下限
+                // （渲染尺寸 = max(显式尺寸, contentSize)）；于是目录树一展开节点就只能
+                // 拉大、不能缩小，侧栏/视口也永远拿不到滚动区间（看起来就像没有滚动条）。
+                // 所以这里让 widget 直接脱离文档流：绝对定位铺满"槽位顶部 → 卡片底部"，
+                // 它再怎么长都撑不高卡片，节点高度只由显式尺寸（min-height）决定。
+                // 位置用 getBoundingClientRect 差值 ÷ 画布缩放比 量出来，跟缩放无关，
+                // 也不依赖 offsetParent 链；模式判断用结构（是否在 .lg-node 内）。
+                let vueChromeOffset = 0;
+                let vueHeightSynced = false;
+                const syncNodes20Height = () => {
+                    if (!mainWrapper.isConnected) return;
+                    if (mainWrapper.dataset.gswqNoAbs === "1") return; // 兜底已判定卡片不是包含块
+                    const card = mainWrapper.closest(".lg-node");
+                    const st = mainWrapper.style;
+                    if (!card) {
+                        // 旧画布前端：外层浮层本来就给了确定高度，恢复成 100% 填满
+                        if (st.position === "absolute") {
+                            Object.assign(st, { position: "relative", top: "", left: "", right: "", bottom: "", width: "" });
+                            st.height = "100%";
+                            vueHeightSynced = false;
+                        }
+                        return;
+                    }
+                    if (st.position !== "absolute") {
+                        const cardW = card.offsetWidth;
+                        if (!(cardW > 0) || !(mainWrapper.offsetWidth > 20)) return; // 布局未完成，等下一帧
+                        const cr = card.getBoundingClientRect();
+                        const mr = mainWrapper.getBoundingClientRect();
+                        if (!(cr.width > 0)) return;
+                        const scale = cr.width / cardW;
+                        const top = (mr.top - cr.top) / scale;
+                        if (!(top > 0)) return;
+                        vueChromeOffset = Math.round(top);
+                        st.position = "absolute";
+                        st.boxSizing = "border-box";
+                        st.top = vueChromeOffset + "px";
+                        st.left = Math.round((mr.left - cr.left) / scale) + "px";
+                        st.right = Math.max(0, Math.round((cr.right - mr.right) / scale)) + "px";
+                        st.width = "auto";
+                        st.height = "auto";
+                        st.minHeight = "0px";
+                        st.bottom = "0px";
+                    }
+                    vueHeightSynced = true;
+                };
+                // 首帧后卡片才量得到尺寸，多补几次（幂等）
+                // 兜底校验：万一卡片不是绝对定位的包含块（高度被判成 ~0），回退成不动的布局，
+                // 宁可维持旧行为，也不能出现空白节点
+                const verifyNodes20Layout = () => {
+                    if (!mainWrapper.isConnected) return;
+                    if (mainWrapper.style.position !== "absolute") return;
+                    const card = mainWrapper.closest(".lg-node");
+                    if (!card) return;
+                    const top = parseFloat(mainWrapper.style.top) || 0;
+                    const expected = card.offsetHeight - top;
+                    if (expected > 120 && mainWrapper.offsetHeight < 60) {
+                        mainWrapper.dataset.gswqNoAbs = "1";
+                        Object.assign(mainWrapper.style, { position: "relative", top: "", left: "", right: "", bottom: "", width: "" });
+                        mainWrapper.style.height = "100%";
+                        mainWrapper.style.minHeight = "0";
+                        vueHeightSynced = false;
+                        console.warn("[geniusewzq] 视觉资源库：Nodes 2.0 绝对定位未生效，已回退布局");
+                    }
+                };
+                const scheduleNodes20Sync = () => {
+                    syncNodes20Height();
+                    requestAnimationFrame(syncNodes20Height);
+                    [0, 80, 300, 800].forEach((d) => setTimeout(syncNodes20Height, d));
+                    setTimeout(verifyNodes20Layout, 1000);
+                };
 
                 // --- 载入状态遮罩 ---
                 const loadingOverlay = document.createElement("div");
@@ -163,7 +246,7 @@ app.registerExtension({
                         const nextName = rest.length ? rest[Math.min(idx, rest.length - 1)] : null;
                         const nextPath = nextName ? buildFullPath(nextName) : "";
                         imageWidget.value = nextPath;
-                        if (imageWidget.callback) imageWidget.callback(nextPath);
+                        if (imageWidget.callback) imageWidget.callback.call(imageWidget, nextPath);
                         node.setDirtyCanvas(true, true);
                     }
                     await refreshGallery();
@@ -182,7 +265,7 @@ app.registerExtension({
                             if (!r.success) throw new Error(r.error || "撤销失败");
                             await refreshGallery();
                             imageWidget.value = filePath;
-                            if (imageWidget.callback) imageWidget.callback(filePath);
+                            if (imageWidget.callback) imageWidget.callback.call(imageWidget, filePath);
                             node.setDirtyCanvas(true, true);
                             updateVirtualScroll();
                             showToast("已撤销删除");
@@ -216,7 +299,7 @@ app.registerExtension({
                     ensurePreview(normalized);
                     if (imageWidget.value === normalized) return;
                     imageWidget.value = normalized;
-                    if (imageWidget.callback) imageWidget.callback(normalized);
+                    if (imageWidget.callback) imageWidget.callback.call(imageWidget, normalized);
                     node.setDirtyCanvas(true, true);
                 };
 
@@ -571,12 +654,6 @@ app.registerExtension({
                     parts.pop();
                     return parts.length ? parts.join("/") : ".";
                 };
-                const getRootLabel = () => {
-                    const base = (pathWidget.value || "").trim().replace(/[\\/]+$/, "");
-                    if (!base) return "根目录";
-                    return base.split(/[\\/]/).filter(Boolean).pop() || "根目录";
-                };
-
                 // --- 绝对路径辅助（和 Windows 资源管理器一致：C:\a\b） ---
                 const normSlashes = (s) => String(s || "").replace(/\\/g, "/").replace(/\/{2,}/g, "/");
                 // 保留盘符根 "E:/"（去掉斜杠会变成 "E:"，Windows 上含义会变成“E: 当前目录”）
@@ -616,7 +693,7 @@ app.registerExtension({
                     pathWidget.value = stripTrailingSlash(normSlashes(abs));
                     memoryWidget.value = ".";
                     node.expandedFolders = new Set(["."]);
-                    if (pathWidget.callback) return pathWidget.callback(pathWidget.value);
+                    if (pathWidget.callback) return pathWidget.callback.call(pathWidget, pathWidget.value);
                     return refreshGallery();
                 };
                 const folderExists = (folder) => {
@@ -642,6 +719,13 @@ app.registerExtension({
                         if (!j || j.error) { if (j && j.error) showToast(j.error); return false; }
                         node.galleryData.tree[key] = j.files || [];
                         node.galleryData.mtimes[key] = j.mtimes || {};
+                        node.galleryData.sizes[key] = j.sizes || {};
+                        node.galleryData.bytes[key] = j.bytes || {};
+                        // 旧的 Python 模块没重启过时不会返回 sizes / bytes，提示一次
+                        if (!j.sizes && (j.files || []).length && !node._gswqSizeHint) {
+                            node._gswqSizeHint = true;
+                            showToast("分辨率 / 文件大小需要重启 ComfyUI 后才会返回");
+                        }
                         if ((j.prompts || []).length) node.galleryData.prompts[key] = j.prompts;
                         else delete node.galleryData.prompts[key];
                         node.childCounts[key] = j.childCounts || {};
@@ -1123,11 +1207,19 @@ app.registerExtension({
                                 box.style.display = "flex"; box.style.alignItems = "center"; box.style.gap = "6px";
                                 const nameEl = document.createElement("span");
                                 nameEl.style = "flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;";
+                                // 分辨率：后端 list_folder 顺带返回 sizes，列表模式下直接标出来
+                                const sizeEl = document.createElement("span");
+                                sizeEl.style = "flex-shrink:0; font-size:10px; color:#a3a3a3; font-variant-numeric:tabular-nums;";
+                                const sz0 = node.galleryData.sizes?.[folder]?.[entry.name];
+                                if (sz0 && sz0[0]) sizeEl.innerText = sz0[0] + "×" + sz0[1];
+                                const bytesEl = document.createElement("span");
+                                bytesEl.style = "flex-shrink:0; font-size:10px; color:#7c7c7c; font-variant-numeric:tabular-nums; min-width:46px; text-align:right;";
+                                bytesEl.innerText = fmtBytes(node.galleryData.bytes?.[folder]?.[entry.name]);
                                 const markEl = document.createElement("span");
                                 markEl.innerText = "词"; markEl.title = "有提示词(txt)";
                                 markEl.style = "flex-shrink:0; font-size:9px; line-height:13px; color:#81C784; background:rgba(129,199,132,0.12); border-radius:3px; padding:0 3px; opacity:0;";
-                                box.appendChild(nameEl); box.appendChild(markEl);
-                                box._nameEl = nameEl; box._markEl = markEl;
+                                box.appendChild(nameEl); box.appendChild(sizeEl); box.appendChild(bytesEl); box.appendChild(markEl);
+                                box._nameEl = nameEl; box._sizeEl = sizeEl; box._bytesEl = bytesEl; box._markEl = markEl;
                             } else {
                                 box.style.background = "#222"; box.style.borderRadius = "4px";
                                 const img = document.createElement("img"); img.style = "width:100%; height:100%; object-fit:cover; display:block; opacity:0; transition:opacity 0.3s;";
@@ -1159,6 +1251,11 @@ app.registerExtension({
                         box.style.width = `${itemWidth}px`; box.style.height = `${isList ? 26 : itemWidth}px`;
                         box.style.transform = `translate(${x}px, ${y}px)`;
                         if (box._nameEl) box._nameEl.innerText = entry.name;
+                        if (box._sizeEl && !isFolder) {
+                            const sz = node.galleryData.sizes?.[folder]?.[entry.name];
+                            box._sizeEl.innerText = sz && sz[0] ? sz[0] + "×" + sz[1] : "";
+                            if (box._bytesEl) box._bytesEl.innerText = fmtBytes(node.galleryData.bytes?.[folder]?.[entry.name]);
+                        }
                         if (box._countEl) box._countEl.innerText = isFolder && entry.count ? String(entry.count) : "";
                         if (isFolder) {
                             if (isList) {
@@ -1169,7 +1266,8 @@ app.registerExtension({
                             continue;
                         }
                         const showMark = hasPrompt(fullPath);
-                        box.title = entry.name + (showMark ? "（有提示词）" : "");
+                        const metaTxt = [box._sizeEl ? box._sizeEl.innerText : "", box._bytesEl ? box._bytesEl.innerText : ""].filter(Boolean).join(" · ");
+                        box.title = entry.name + (metaTxt ? " · " + metaTxt : "") + (showMark ? "（有提示词）" : "");
                         if (box._markEl) box._markEl.style.opacity = showMark ? "1" : "0";
                         if (isList) {
                             box.style.color = isSelected ? "#00ecff" : "#ccc"; box.style.background = isSelected ? "#2a2a2a" : "transparent";
@@ -1192,7 +1290,7 @@ app.registerExtension({
                         // 刷新 = 丢掉按需加载的缓存，只重新拉当前这条链（不扫全库）
                         node.listingLoaded = new Set();
                         node.childCounts = {};
-                        node.galleryData = { tree: {}, prompts: {}, mtimes: {} };
+                        node.galleryData = { tree: {}, prompts: {}, mtimes: {}, sizes: {}, bytes: {} };
                         let current = getCurrentFolder();
                         if (!(await ensureFolderChain(current, true))) {
                             current = ".";
@@ -1282,7 +1380,17 @@ app.registerExtension({
                     memoryWidget.value = ".";
                     return refreshGallery();
                 };
-                node.onResize = () => { if (node.resizeTimer) clearTimeout(node.resizeTimer); node.resizeTimer = setTimeout(() => updateVirtualScroll(), 60); };
+                // 节点尺寸变化：先同步 DOM widget 高度，再重算可见行。
+                // 必须链接原有 onResize（addDOMWidget 挂的 beforeResize/afterResize 在链上），
+                // 直接覆盖会让前端的 widget 尺寸回调失效。
+                const prevOnResize = node.onResize;
+                node.onResize = function (size) {
+                    if (prevOnResize) prevOnResize.apply(this, arguments);
+                    syncNodes20Height();
+                    if (node.resizeTimer) clearTimeout(node.resizeTimer);
+                    node.resizeTimer = setTimeout(() => updateVirtualScroll(), 60);
+                };
+                scheduleNodes20Sync();
 
                 // 视口尺寸变化（含首次布局完成、侧栏拖拽、节点缩放）→ 自动重算可见行，
                 // 从根本上避免“刚打开时列表只显示一部分”
@@ -1413,7 +1521,7 @@ app.registerExtension({
                         const currentPath = pathWidget.value.trim();
                         const fullPath = `${currentPath}/${folder}/${imgName}`.replace(/\/+/g, '/');
                         imageWidget.value = fullPath;
-                        if (imageWidget.callback) imageWidget.callback(fullPath);
+                        if (imageWidget.callback) imageWidget.callback.call(imageWidget, fullPath);
                         node.setDirtyCanvas(true, true);
                         updateVirtualScroll();
                         // 滚动到新图片位置

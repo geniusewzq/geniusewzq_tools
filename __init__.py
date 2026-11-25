@@ -1,4 +1,5 @@
-﻿import os
+import json
+import os
 import shutil
 import time
 from aiohttp import web
@@ -104,10 +105,31 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AspectRatioSwitcher": "比例切换器",
     "AspectRatioSwitcherPro": "比例切换器 Pro",
     "WebpLongVideoBridgeFinal": "截取关键帧",
-    "VisualCharacterSelector": "视觉资源库选择器",
+    "VisualCharacterSelector": "视觉资源库",
     "DynamicPromptChain": "动态提示词链",
     "FastGroupsBypasser": "快速分组开关",
 }
+
+# --- 前端报错诊断：浏览器里的未捕获异常写到 diag.jsonl，方便定位 Nodes 2.0 下的崩溃 ---
+@PromptServer.instance.routes.post("/geniusewzq/diag")
+async def gswq_diag(request):
+    try:
+        data = await request.json()
+    except Exception:
+        data = {"raw": "bad json"}
+    try:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diag.jsonl")
+        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        if isinstance(data, dict):
+            rec.update(data)
+        else:
+            rec["data"] = data
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+    return web.json_response({"ok": True})
+
 
 # ！！！极其重要：必须指定这个目录，前端 JS 才会生效
 WEB_DIRECTORY = "./web"
@@ -115,7 +137,7 @@ WEB_DIRECTORY = "./web"
 __all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY']
 
 # 版本标记：ComfyUI 启动日志中看到此行即确认加载的是最后一版
-print("[geniusewzq_tools] v1.8.8 已加载：6 个节点（视觉资源库选择器/比例切换器/比例切换器 Pro/截取关键帧/动态提示词链/快速分组开关）")
+print("[geniusewzq_tools] v2.0.0 已加载：6 个节点（视觉资源库/比例切换器/比例切换器 Pro/截取关键帧/动态提示词链/快速分组开关）")
 
 
 

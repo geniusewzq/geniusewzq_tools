@@ -1,4 +1,4 @@
-﻿# Geniusewzq Tools - ComfyUI 自定义节点集
+# Geniusewzq Tools - ComfyUI 自定义节点集
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![ComfyUI](https://img.shields.io/badge/ComfyUI-Custom%20Nodes-blue)](https://github.com/comfyanonymous/ComfyUI)
@@ -26,6 +26,8 @@
 - 🔄 **视频帧提取** - WebP 格式长视频分段生成桥接工具
 - 🖼️ **视觉资源库** - 可视化图片浏览器，支持文件夹管理和图片选择
 - 📝 **动态提示词** - 智能组合多个提示词输入，自动适配连接端口
+- 🧠 **提示词工坊** - 按目标模型的提示词规则改写/扩写，要求与输出分区编辑
+- 🎨 **Nodes 2.0 适配** - 6 个节点在新前端（comfyui-frontend-package 1.59.10）下可自由缩放、滚动、跟随主题
 - ⚡ **智能适配** - 自动适配不同模型的分辨率倍数要求
 
 ---
@@ -255,7 +257,9 @@ python -c "from PIL import Image; print(Image.registered_extensions())"
 
 ---
 
-### 3. 视觉资源库选择器 (VisualCharacterSelector)
+### 3. 视觉资源库 (VisualCharacterSelector)
+
+> 显示名已从「视觉资源库选择器」改为「视觉资源库」（v2.0.0），类名 `VisualCharacterSelector` 不变，旧工作流照常加载。
 
 可视化图片资源管理器，支持文件夹树形浏览、图片预览和选择，适用于角色管理、素材库浏览等场景。
 
@@ -340,6 +344,37 @@ python -c "from PIL import Image; print(Image.registered_extensions())"
 - 构建复杂的提示词结构
 - 模块化提示词管理
 - 动态调整提示词组合
+
+---
+
+### 5. 提示词工坊 (PromptForge)
+
+把「你想要什么」交给本地或在线大模型，按目标模型的提示词规范写成能直接出图的提示词。面板分上下两块：上面是**提示词要求**（你的意图，留空则随机创作），下面是**输出提示词**（可直接改、收藏、接到 KSampler）。
+
+#### 输入参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `目标模型` | COMBO | Qwen-Image 2.1 | 决定按哪套提示词规范改写；等于原来的「规范」，已合并为一个下拉 |
+| `语言` | COMBO | 自动 | 自动 / 中文 / 英文 |
+| `服务` | COMBO | 本地 llama.cpp | 本地 llama.cpp 或 DeepSeek 等在线服务 |
+| `提示词` | STRING | 空 | 输出提示词本体，接 KSampler 的正面条件 |
+
+#### 输出参数
+
+| 端口名 | 类型 | 说明 |
+|------|------|------|
+| `提示词` | STRING | 按规范改写后的提示词（只有一根，v2.0.0 起不再输出负面条件） |
+
+#### 面板功能区
+
+- **提示词要求**：写你的意图；右下角手柄可改框高（同时带动节点高度）
+- **输出提示词**：可编辑、收藏、翻译；同样带右下角手柄
+- **✦ 优化提示词 / ✦ 深度扩写**：严格按「要求 + 目标模型规范」改写，不得新增原文没有的人物/道具/动物/场景；勾了「侧重」时对应维度写得更细，扩写则允许补全景别/机位/光线/材质等非主体维度
+- **标签库**：Danbooru 风格标签，点选/随机只写进「提示词要求」；默认收起
+- **收藏夹**：保存常用提示词，数量即时刷新
+
+> ⚠️ **升级提示（v2.0.0）**：节点输出从「正面条件 / 负面条件」两根变成一个「提示词」；「强度」「负面」「保持人物一致」三项已移除，旧工作流的控件值会在加载时自动迁移，接在负面条件上的连线需要手动删掉。
 
 ---
 
@@ -489,6 +524,15 @@ print('WEBP support:', 'WEBP' in Image.registered_extensions().values())
 ---
 
 ## 📝 更新日志
+
+### v2.0.0 (2026-11-26)
+- 🎨 **全面适配 ComfyUI Nodes 2.0**（frontend 1.59.10）：DOM 面板改为绝对定位铺满节点卡片，修掉「展开目录树后节点只能放大、不能缩小」的内容高度棘轮；目录树/图片列表恢复自己的滚动条
+- 🖼️ **视觉资源库**：显示名去掉「选择器」；列表模式增加分辨率（如 `928×1664`）与文件大小，后端 `list_folder` 返回 `sizes`/`bytes`（PIL 读取，按 mtime+size 缓存）
+- 🧠 **新增 提示词工坊 (PromptForge)**：要求/输出双区、按目标模型规范改写、标签库、收藏夹、翻译、19 个「侧重」维度、深度扩写；去掉负面提示词与「保持人物一致」，移除「强度」，输出合并为一根
+- 🐛 **比例切换器 Pro**：修复点击数字框报 `Cannot read properties of undefined (reading 'options')` —— 联动回调直接调用原始 callback 丢了 `this`，改为 `.call(widget, v)`；同类问题在包里另 6 处一并加固
+- ⚡ **快速分组开关**：Nodes 2.0 下 `onDrawForeground`/`onMouseDown` 不再触发导致按钮全失效，改为 DOM 面板渲染，经典画布模式保留原绘制回退
+- 🩺 新增浏览器报错诊断：未捕获异常自动 POST 到 `/geniusewzq/diag`，写入 `diag.jsonl`
+- 🧹 隐藏本插件节点左下角的 Python 模块名药丸，清理若干死代码
 
 ### v1.8.8 (2026-10-31)
 - 📁 大图模式下文件夹重新显示名称（图片仍只显示缩略图，不显示文件名）

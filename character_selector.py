@@ -122,13 +122,33 @@ async def get_gallery(request):
 
     return web.json_response({"tree": tree, "prompts": prompts, "mtimes": mtimes, "error": None})
 
+# 图片尺寸缓存：(绝对路径, mtime, 大小) -> (宽, 高)。只读文件头，不解码像素。
+_size_cache = {}
+
+
+def _image_size(path, st):
+    key = (os.path.abspath(path), st.st_mtime, st.st_size)
+    hit = _size_cache.get(key)
+    if hit is not None:
+        return hit
+    try:
+        with Image.open(path) as im:
+            size = im.size
+    except Exception:
+        size = (0, 0)
+    if len(_size_cache) > 5000:
+        _size_cache.clear()
+    _size_cache[key] = size
+    return size
+
+
 @PromptServer.instance.routes.get("/geniusewzq/list_folder")
 async def list_folder(request):
     """只列一层：当前文件夹的图片 + 直接子文件夹（带各自图片数量）。
     资源库很大时，全库 os.walk 会让根目录卡住，所以前端改成按需展开。"""
     base = os.path.normpath((request.query.get("path", "") or "").strip())
     folder = (request.query.get("folder", ".") or ".").strip() or "."
-    empty = {"folder": folder.replace("\\", "/"), "files": [], "mtimes": {},
+    empty = {"folder": folder.replace("\\", "/"), "files": [], "mtimes": {}, "sizes": {}, "bytes": {},
              "prompts": [], "childCounts": {}, "error": None}
     if not base or not os.path.isdir(base):
         empty["error"] = "路径不存在"
@@ -145,6 +165,8 @@ async def list_folder(request):
 
     exts = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
     files, mtimes, prompts, child_counts = [], {}, [], {}
+    sizes = {}
+    bytes_ = {}
     try:
         with os.scandir(target) as it:
             entries = list(it)
@@ -181,10 +203,23 @@ async def list_folder(request):
                     prompts.append(f)
         except OSError:
             pass
+    # 列表模式要显示分辨率：只读文件头拿尺寸，按 (路径, mtime, 大小) 缓存
+    for f in files:
+        try:
+            p = os.path.join(target, f)
+            st = os.stat(p)
+            w, h = _image_size(p, st)
+            if w and h:
+                sizes[f] = [w, h]
+            bytes_[f] = st.st_size
+        except OSError:
+            pass
     return web.json_response({
         "folder": folder.replace("\\", "/"),
         "files": files,
         "mtimes": mtimes,
+        "sizes": sizes,
+        "bytes": bytes_,
         "prompts": sorted(prompts),
         "childCounts": child_counts,
         "error": None,

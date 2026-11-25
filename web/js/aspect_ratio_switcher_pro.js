@@ -300,7 +300,7 @@ app.registerExtension({
                     node._gswqApplyLocks();
                     node._gswqUpdate();
                     persistSoon();
-                    return old ? old(v) : undefined;
+                    return old ? old.call(widget, v) : undefined;
                 };
             };
             // 切到手动模式的瞬间：自定义宽高自动继承刚才百万像素模式算出的尺寸（模拟页行为）
@@ -322,7 +322,7 @@ app.registerExtension({
                 widget.callback = (v) => {
                     node._gswqUpdate();
                     persistSoon();
-                    return old ? old(v) : undefined;
+                    return old ? old.call(widget, v) : undefined;
                 };
             });
 
@@ -406,6 +406,26 @@ app.registerExtension({
             }
 
             node._gswqReadoutText = readoutText;
+
+            // Nodes 2.0（Vue 节点）：节点不再走 canvas 前景绘制，
+            // 灰行补值浮层和底部只读行原本靠 onDrawForeground 每帧同步，
+            // 新版前端里这个回调根本不触发 → 用 rAF 自己驱动一份（旧画布下不做事）。
+            if (node._gswqRaf == null) {
+                const tick = () => {
+                    if (node._gswqRaf == null) return;
+                    const vueMode = !!(window.LiteGraph && window.LiteGraph.vueNodesMode);
+                    if (vueMode) {
+                        if (node.flags?.collapsed) {
+                            if (node._gswqOv) node._gswqOv.style.display = "none";
+                        } else {
+                            node._gswqSyncOverlay?.();
+                        }
+                        node._gswqSyncReadout?.();
+                    }
+                    node._gswqRaf = requestAnimationFrame(tick);
+                };
+                node._gswqRaf = requestAnimationFrame(tick);
+            }
             node._gswqApplyLocks();
             node._gswqUpdate();
             node._gswqSyncReadout();
@@ -505,6 +525,8 @@ app.registerExtension({
         const onRemoved = nodeType.prototype.onRemoved;
         nodeType.prototype.onRemoved = function () {
             onRemoved?.apply(this, arguments);
+            if (this._gswqRaf != null) cancelAnimationFrame(this._gswqRaf);
+            this._gswqRaf = null;
             this._gswqOv?.remove();
             this._gswqOv = null;
         };

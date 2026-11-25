@@ -4,3 +4,6 @@ promptforge_vendor/
 web/promptforge_browser.html
 __pycache__/
 *.bak-*
+# 开发期临时目录 / 浏览器报错诊断日志，不进仓库
+.dsh_scratch/
+diag.jsonl
